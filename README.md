@@ -12,6 +12,17 @@ the mascot types behind a laptop, the subtitle names the tool Claude is using
 right now, and a comet sweeps the bottom edge. The other states are described
 under [Display layout](#display-layout).*
 
+![The bar while Claude waits for permission: WAITING with animated dots, "Allow Bash?" underneath, the mascot tapping its foot and an amber ripple along the bottom](docs/waiting.gif)
+
+***WAITING**: Claude needs a permission or an answer. The subtitle says what
+it is asking for, and the bar makes a short sound
+(see [Waiting dots](#waiting-dots) and [Sounds](#sounds)).*
+
+![The bar after Claude finishes: FINISHED with a flashing double exclamation mark, "Done in 42s" underneath, a rainbow rail along the bottom and fireworks to the right of the text](docs/finished.gif)
+
+*Turn done: **FINISHED** with the turn time, a rainbow rail and fireworks
+(see [Celebration](#celebration)).*
+
 ## What the official APIs support
 
 BUSY Bar is an HTTP server. The same API is available through:
@@ -67,7 +78,10 @@ Multiple sessions share an atomically locked state file under
 `WORKING` → `WAITING_FOR_INPUT` → `LIMIT` → `ERROR` → `FINISHED` → `READY` → `IDLE`
 
 Consequently one active session keeps the bar blue even if another session is
-waiting or finished. Identical aggregate states are not resent. Device I/O is
+waiting or finished. When several sessions share the winning state, the subtitle,
+mode badge and turn time follow one "focused" session (the first to enter that
+state) until it has been quiet for 20 seconds, so the bar does not flip between
+instances. Identical aggregate states are not resent. Device I/O is
 performed in a detached process, so hook execution does not wait on the network.
 A single lightweight reaper removes sessions that have emitted no hook event
 for the configured stale timeout; this recovers from terminal crashes and
@@ -299,7 +313,8 @@ Design constraints learned from the device, all handled in
 
 ## Requirements
 
-- macOS (primary target; the state lock uses POSIX `flock`)
+- macOS (primary target) or Linux; both use the POSIX `flock` state lock. Native
+  Windows is not supported (see [Linux and Windows](#linux-and-windows))
 - Claude Code with plugin support and the hook events in `hooks/hooks.json`
 - Python 3.9 or newer (the macOS `/usr/bin/python3` supplied by Xcode tools is
   sufficient)
@@ -346,6 +361,43 @@ claude --plugin-dir /path/to/busy-claude
 
 `claude plugin validate .` checks the manifest. It passes, with one warning
 about the plugin name containing "claude"; that is cosmetic.
+
+#### Linux and Windows
+
+The development and testing happened on macOS. The notes below follow from what
+the code needs; they have not been run on real Linux or Windows machines.
+
+**Linux.** The install is the same as above (`~/.claude/skills/busy-claude`).
+The plugin needs `python3` 3.9 or newer on `PATH` (the hooks run
+`python3 .../busybar_status.py hook`) and nothing else: no pip packages. State is
+kept in the plugin's data directory that Claude Code provides, or in the folder
+named by `BUSYBAR_STATE_DIR`. If you run the script outside Claude Code (for
+example `busybarctl`) without either variable, it falls back to
+`~/Library/Caches/claude-busy-bar`; set `BUSYBAR_STATE_DIR` to something like
+`~/.cache/claude-busy-bar` to avoid creating a `Library` folder.
+
+The USB address `http://10.0.4.20` only works if your system brings up the bar's
+USB network interface. If `./scripts/busybarctl check` cannot reach it, use the
+[LAN option](#option-b-lan-wi-fi) instead; it needs no USB driver.
+
+**Windows.** Native Windows is not supported. The state lock uses Python's
+`fcntl` module, which does not exist on Windows, so every hook would fail on
+import. (The failure never blocks Claude Code, but the bar will not update.) Use
+WSL2 instead:
+
+1. Install WSL2 with a Linux distribution that has `python3` 3.9+ and Claude Code.
+2. Run Claude Code **inside WSL** and follow the Linux steps above, with the
+   plugin under the WSL home directory (`~/.claude/skills/busy-claude`), not under
+   `C:\Users\...`.
+3. Connect the bar over [LAN](#option-b-lan-wi-fi). The USB network interface is
+   attached to Windows, not to WSL, so the default `10.0.4.20` address is not
+   reachable from inside WSL. Use the bar's Wi-Fi address and set the plugin's
+   options as in [step 3](#3-point-the-plugin-at-the-bar-lan-only).
+4. Verify with `./scripts/busybarctl --url <bar-address> --auth wifi check`.
+
+Supporting native Windows would need the `fcntl` lock replaced (for example with
+`msvcrt.locking`), the `python3` hook command changed, and the detached
+process handling in `scripts/busybar_status.py` reworked.
 
 ### 2. Connect the BUSY Bar
 
