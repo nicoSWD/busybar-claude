@@ -55,6 +55,41 @@ claude plugin marketplace add nicoSWD/busybar-claude
 claude plugin install busy-claude@busybar-claude
 ```
 
+### Install with one command
+
+The install script does the same two steps, checks that Claude Code and Python are
+there, asks whether your bar is on USB or Wi-Fi, and can set up the optional
+[statusline](#optional-plan-usage-on-the-ready-screen). It only runs Claude Code's
+own `claude plugin ...` commands.
+
+macOS, Linux, WSL:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/nicoSWD/busybar-claude/main/install.sh | sh
+```
+
+Windows (PowerShell):
+
+```powershell
+irm https://raw.githubusercontent.com/nicoSWD/busybar-claude/main/install.ps1 | iex
+```
+
+- **Wi-Fi bar:** answer "no" to the USB question and enter the bar's address and API
+  password. The password goes to Claude Code through a pipe, never onto a command line.
+- **Windows:** the plugin's hooks run `python3`. If only `python` or `py` exists, the
+  script offers to copy it to `python3.exe` (and tells you what to do if the Microsoft
+  Store alias gets in the way). It never changes anything without asking.
+- **Read it first:** `curl -fsSL <url> -o install.sh`, then `sh install.sh --dry-run`
+  prints every command without running it.
+- **Options:** `--yes` (no questions, defaults), `--dry-run`, `--statusline`,
+  `--uninstall`. Pass them with `curl ... | sh -s -- --yes`. In PowerShell:
+  `& ([scriptblock]::Create((irm https://raw.githubusercontent.com/nicoSWD/busybar-claude/main/install.ps1))) -Yes`
+  (`-DryRun`, `-Statusline` and `-Uninstall` work the same way).
+
+`install.sh` is tested with a stand-in for `claude`, and its install, re-run and
+uninstall were run against a clean Claude Code configuration on macOS. `install.ps1`
+has not been run on a real Windows machine yet.
+
 ### Update and uninstall
 
 ```sh
@@ -144,7 +179,8 @@ running on Windows itself:
 
 1. Install the plugin into `%USERPROFILE%\.claude\skills\busy-claude`
    (for example `git clone https://github.com/nicoSWD/busybar-claude.git "%USERPROFILE%\.claude\skills\busy-claude"`).
-2. Make sure a **`python3` executable is on `PATH`**. The hooks run `python3`
+2. Make sure a **`python3` executable is on `PATH`** (the PowerShell
+   [install script](#install-with-one-command) checks this and offers to fix it). The hooks run `python3`
    directly, without a shell, and Claude Code's hook format has no per-OS command,
    so `python3` must resolve to a real `.exe`. Python from the Microsoft Store
    provides `python3.exe`. The python.org installer provides `python.exe` and

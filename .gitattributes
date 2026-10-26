@@ -1,1 +1,3 @@
 *.cmd text eol=crlf
+*.sh text eol=lf
+scripts/busybarctl text eol=lf
