@@ -108,7 +108,8 @@ x 0-15    mascot      16x16 looping animation, one per state
 
 ### Mascot
 
-A pixel-art Claude (orange, blocky, eyes as cut-outs) reacts to the state:
+A pixel-art Claude (orange, blocky, 14×13 pixels so it stands nearly the full
+height of the display, eyes as cut-outs) reacts to the state:
 
 | State | Animation |
 | --- | --- |
@@ -117,7 +118,7 @@ A pixel-art Claude (orange, blocky, eyes as cut-outs) reacts to the state:
 | `LIMIT` | worn out and sweating beside a running hourglass |
 | `FINISHED` | jumps twice in a shower of confetti, then waves with twinkling sparkles |
 | `ERROR` | dizzy X eyes, shakes, red `!`, a puff of smoke |
-| `READY` | waves hello, blinks, a `>_` prompt with a blinking cursor overhead |
+| `READY` | waves hello, blinks, a text cursor blinking in the corner |
 | `IDLE` | asleep and breathing, dim, little z's drifting up |
 
 The art is drawn procedurally in `scripts/busybar_mascot.py` (sprite, eye styles,
@@ -321,8 +322,8 @@ with a `BUSYBAR_` prefix.
    ./scripts/busybarctl demo
    ```
 
-2. Start a new Claude Code session. The bar shows **READY** with the `>_`
-   mascot. Send a prompt: it switches to **WORKING** with the typing mascot, the
+2. Start a new Claude Code session. The bar shows **READY** with the mascot
+   waving. Send a prompt: it switches to **WORKING** with the typing mascot, the
    current tool as a subtitle, and the comet, as in the picture above.
 3. Nothing happens? Turn on the **Debug logging** option, reproduce it, and read
    `debug.log`. The [troubleshooting](#troubleshooting) section covers the usual

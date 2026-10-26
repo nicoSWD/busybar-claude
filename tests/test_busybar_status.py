@@ -562,6 +562,8 @@ class MascotTests(unittest.TestCase):
     def test_asset_names_are_versioned_per_state(self):
         names = {mascot.asset_name(state) for state in status.STATUSES}
         self.assertEqual(len(names), len(status.STATUSES))
+        for name in names:  # the device cannot remove files whose full path is over ~64 characters
+            self.assertLessEqual(len("/ext/user_assets/claude-code-status/" + name), 64, name)
         self.assertTrue(all(re.search(r"-v\d+\.anim$", name) for name in names))
         self.assertNotEqual(mascot.asset_name("WORKING"), "mascot-working-v2.anim", "the fixed art got a new name")
 
