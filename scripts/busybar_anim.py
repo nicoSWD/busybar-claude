@@ -347,3 +347,85 @@ def celebration_asset_name(kind: str, *parts: object) -> str:
     """Name for a fixed (not color-configured) celebration asset; changes with ANIMATION_VERSION."""
     material = ":".join([str(ANIMATION_VERSION), kind] + [str(part) for part in parts])
     return "%s-%s.anim" % (kind, hashlib.sha256(material.encode("ascii")).hexdigest()[:8])
+
+
+# ---- night scene (IDLE): moon and stars on the right, a slowly breathing glow along the rail
+
+NIGHT_WIDTH = 16
+NIGHT_HEIGHT = 12
+NIGHT_FPS = 8
+NIGHT_FRAMES = 48  # a six second loop
+NIGHT_BRIGHTNESS = 0.55  # dim: this is the screen the bar rests on
+MOON: Rgb = (225, 215, 165)
+# (x, y, twinkle speed in cycles per loop, phase offset)
+STARS = [(2, 2, 2, 0.0), (5, 7, 3, 0.31), (8, 1, 2, 0.62), (1, 9, 3, 0.15), (14, 9, 2, 0.47), (7, 10, 1, 0.8), (4, 4, 3, 0.9), (9, 5, 2, 0.2)]
+SHOOTING_START, SHOOTING_LENGTH = 22, 9  # frame the shooting star appears, and how long it takes to cross
+
+
+def night_frames() -> List[bytes]:
+    out: List[bytes] = []
+    for frame in range(NIGHT_FRAMES):
+        canvas = [[0.0, 0.0, 0.0] for _ in range(NIGHT_WIDTH * NIGHT_HEIGHT)]
+
+        def plot(x: float, y: float, color: Rgb, level: float) -> None:
+            px, py = int(round(x)), int(round(y))
+            if 0 <= px < NIGHT_WIDTH and 0 <= py < NIGHT_HEIGHT and level > 0.03:
+                cell = canvas[py * NIGHT_WIDTH + px]
+                for i in range(3):
+                    cell[i] = max(cell[i], color[i] * min(1.0, level))
+
+        for y in range(NIGHT_HEIGHT):  # a crescent: a disc with a bite taken out of it
+            for x in range(NIGHT_WIDTH):
+                inside = math.hypot(x - 11.0, y - 4.0) <= 3.3
+                bite = math.hypot(x - 12.8, y - 3.2) <= 2.9
+                if inside and not bite:
+                    plot(x, y, MOON, 0.9)
+        for x, y, speed, phase in STARS:
+            twinkle = 0.5 - 0.5 * math.cos(2 * math.pi * (speed * frame / NIGHT_FRAMES + phase))
+            plot(x, y, (200, 210, 255), 0.12 + 0.88 * twinkle ** 2)
+        age = (frame - SHOOTING_START) / SHOOTING_LENGTH
+        if 0.0 <= age < 1.0:  # a shooting star streaks from the top right toward the bottom left
+            for trail in range(4):
+                back = max(0.0, age - trail * 0.07)
+                plot(15 - 12 * back, 0 + 9 * back, (255, 255, 255), (1.0 - trail * 0.28) * (1.0 - age * 0.4))
+        pixels = bytearray()
+        for r, g, b in canvas:
+            pixels += bytes([int(b * NIGHT_BRIGHTNESS), int(g * NIGHT_BRIGHTNESS), int(r * NIGHT_BRIGHTNESS)])
+        out.append(bytes(pixels))
+    return out
+
+
+def night_animation() -> bytes:
+    return encode_anim(NIGHT_WIDTH, NIGHT_HEIGHT, NIGHT_FPS, night_frames())
+
+
+BREATH_FRAMES = 40
+BREATH_FPS = 10  # a four second breath
+
+
+def breath_frames(color: Rgb, width: int, height: int = ANIMATION_HEIGHT, frames: int = BREATH_FRAMES) -> List[bytes]:
+    """A soft glow that swells and fades, brightest in the middle, like something asleep."""
+    center = (width - 1) / 2.0
+    out: List[bytes] = []
+    for frame in range(frames):
+        swell = 0.10 + 0.45 * (0.5 - 0.5 * math.cos(2 * math.pi * frame / frames))
+        rows = []
+        for index in range(height):
+            gain = ANIMATION_ROW_GAIN[min(index, len(ANIMATION_ROW_GAIN) - 1)]
+            row = bytearray()
+            for x in range(width):
+                profile = math.cos((x - center) / (center + 1) * math.pi / 2) ** 2  # 1 in the middle, ~0 at the ends
+                level = swell * (0.3 + 0.7 * profile) * gain
+                row += bytes([int(color[2] * level), int(color[1] * level), int(color[0] * level)])  # BGR
+            rows.append(bytes(row))
+        out.append(b"".join(rows))
+    return out
+
+
+def breath_animation(color: str, width: int) -> bytes:
+    return encode_anim(width, ANIMATION_HEIGHT, BREATH_FPS, breath_frames(parse_rgb(color), width))
+
+
+def breath_asset_name(color: str, width: int) -> str:
+    material = "%d:%d:%d:%s" % (ANIMATION_VERSION, BREATH_FPS, width, color[1:7].upper())
+    return "breath-%s.anim" % hashlib.sha256(material.encode("ascii")).hexdigest()[:8]

@@ -417,6 +417,9 @@ class StatusTests(unittest.TestCase):
             elif expected == "FINISHED":
                 self.assertEqual(set(device.screen), {status.TITLE_ID, status.SUBTITLE_ID, status.MASCOT_ID, status.BANG_ID,
                                                       status.ANIMATION_ID, status.FIREWORKS_ID}, expected)
+            elif expected == "IDLE":
+                self.assertEqual(set(device.screen), {status.TITLE_ID, status.SUBTITLE_ID, status.MASCOT_ID,
+                                                      status.ANIMATION_ID, status.NIGHT_ID}, expected)
             elif expected != "WORKING":
                 self.assertEqual(set(device.screen), {status.TITLE_ID, status.MASCOT_ID}, expected)
 
@@ -637,6 +640,28 @@ class StatusTests(unittest.TestCase):
         for quiet in ("WORKING", "ERROR", "LIMIT", "READY", "IDLE"):
             self.assertFalse(due(status=quiet, previous_status="FINISHED", turn_seconds=99.0), quiet)
 
+    def test_idle_is_a_night_scene(self):
+        plan = status.asset_plan(self.config, "IDLE")
+        self.assertEqual(set(plan), {status.MASCOT_ID, status.ANIMATION_ID, status.NIGHT_ID})
+        self.assertEqual(plan[status.ANIMATION_ID][0], anim.breath_asset_name(self.config.colors["IDLE"], status.COMET_WIDTH))
+        off = dataclasses.replace(self.config, animation=False)
+        self.assertEqual(set(status.asset_plan(off, "IDLE")), {status.MASCOT_ID})
+        client = status.BusyBarClient(self.config)
+        wanted = client.elements("IDLE", assets={key: value[0] for key, value in plan.items()})
+        self.assertEqual(wanted[status.SUBTITLE_ID]["text"], "No session", "a default subtitle: there is no session to take one from")
+        self.assertLessEqual(font.text_width("No session", "tiny"), status.SUBTITLE_MAX_WIDTH)
+        self.assertEqual((wanted[status.TITLE_ID]["align"], wanted[status.TITLE_ID]["y"]), ("top_mid", status.TITLE_Y))
+        sky = wanted[status.NIGHT_ID]
+        self.assertEqual((sky["x"], sky["y"]), (status.SKY_X, 0), "the same free corner as the fireworks")
+        self.assertGreaterEqual(sky["x"], 36 + 40 // 2, "clear of the widest centered text")
+        self.assertEqual(wanted[status.ANIMATION_ID]["x"], status.COMET_X)
+        self.assertEqual(status.DEFAULT_COLORS["IDLE"], "#7D8CB0FF")
+        self.assertEqual(wanted[status.SUBTITLE_ID]["color"], "#7F7F7FFF", "dimmed to half on the resting screen")
+        self.assertEqual(client.elements("WORKING", activity="Reading")[status.SUBTITLE_ID]["color"], "#FFFFFFFF")
+        self.assertEqual(status.scale_color("#80FF0A12", 0.5), "#407F0512")
+        for other in ("READY", "FINISHED", "WORKING"):
+            self.assertNotIn(status.NIGHT_ID, status.BusyBarClient(self.config).elements(other))
+
     def test_waiting_says_what_it_waits_for(self):
         for payload, expected in [
             ({"hook_event_name": "PermissionRequest", "tool_name": "Bash"}, "Allow Bash?"),
@@ -696,7 +721,7 @@ class StatusTests(unittest.TestCase):
                          anim.ping_asset_name(self.config.colors["WAITING_FOR_INPUT"], status.COMET_WIDTH))
         working = status.asset_plan(self.config, "WORKING")
         self.assertNotEqual(working[status.ANIMATION_ID][0], waiting[status.ANIMATION_ID][0])
-        for state in ("LIMIT", "ERROR", "READY", "IDLE"):
+        for state in ("LIMIT", "ERROR", "READY"):
             self.assertNotIn(status.ANIMATION_ID, status.asset_plan(self.config, state), state)
         off = dataclasses.replace(self.config, animation=False)
         self.assertNotIn(status.ANIMATION_ID, status.asset_plan(off, "WAITING_FOR_INPUT"))
@@ -992,6 +1017,24 @@ class AnimationTests(unittest.TestCase):
             frames.append(anim.rle_decompress(payload) if encoding == 1 else payload)
             offset += 4 + length
         return frames
+
+    def test_night_scene_and_breath_have_the_right_size_and_move(self):
+        night = anim.night_animation()
+        self.assertEqual(night[9:11], bytes([16, 12]))
+        frames = self.frames_of(night)
+        self.assertEqual(len(frames), anim.NIGHT_FRAMES)
+        self.assertEqual({len(frame) for frame in frames}, {16 * 12 * 3})
+        lit = lambda frame: sum(1 for i in range(0, len(frame), 3) if frame[i:i + 3] != b"\x00\x00\x00")
+        self.assertGreater(len(set(frames)), 20, "twinkling and a shooting star")
+        self.assertGreater(min(lit(frame) for frame in frames), 10, "the moon is always there")
+        self.assertLessEqual(max(max(frame) for frame in frames), 255 * anim.NIGHT_BRIGHTNESS + 1, "dim")
+        breath = self.frames_of(anim.breath_animation("#7D8CB0FF", 32))
+        self.assertEqual(len(breath), anim.BREATH_FRAMES)
+        peak = lambda frame: max(frame)
+        self.assertGreater(peak(breath[anim.BREATH_FRAMES // 2]), 3 * peak(breath[0]), "it swells")
+        row = breath[anim.BREATH_FRAMES // 2][32 * 3:]  # the bright row
+        self.assertGreater(row[16 * 3 + 2], row[0 * 3 + 2], "brightest in the middle")
+        self.assertNotEqual(anim.breath_asset_name("#7D8CB0FF", 32), anim.breath_asset_name("#FF0000FF", 32))
 
     def test_celebration_assets_have_the_right_size_and_move(self):
         for blob, size in [(anim.bang_animation(), (3, 5)), (anim.rainbow_animation(32), (32, 2)),

@@ -69,7 +69,7 @@ DEFAULT_COLORS = {
     "FINISHED": "#00FF66FF",
     "ERROR": "#FF2020FF",
     "READY": "#00C8D0FF",
-    "IDLE": "#606060FF",
+    "IDLE": "#7D8CB0FF",
 }
 TOOL_ACTIVITY = {
     "Read": "Reading",
@@ -159,14 +159,18 @@ MODE_BADGES = {
 }
 BANG_ID = "claude-bang"
 FIREWORKS_ID = "claude-fireworks"
-FIREWORKS_X = 56  # the free area right of the text (x 56-71, rows 0-11)
+SKY_X = 56  # the free area right of the text (x 56-71, rows 0-11): fireworks, or the night sky
+FIREWORKS_X = SKY_X
+NIGHT_ID = "claude-night"
+IDLE_SUBTITLE_DIM = 0.5
+DEFAULT_SUBTITLES = {"IDLE": "No session"}  # states with no session to take a subtitle from
 DOTS_ID = "claude-dots"
 SUFFIX_GAP = 1  # pixels between the last letter and an animated suffix, as between letters
 MASCOT_ID = "claude-mascot"
 MASCOT_WIDTH = busybar_mascot.SIZE
 DISPLAY_WIDTH = 72
-MANAGED_IDS = (TITLE_ID, SUBTITLE_ID, MASCOT_ID, ANIMATION_ID, DOTS_ID, BANG_ID, FIREWORKS_ID, MODE_ID)
-LAYOUT_VERSION = 10  # bump to force a redraw after changing the layout above
+MANAGED_IDS = (TITLE_ID, SUBTITLE_ID, MASCOT_ID, ANIMATION_ID, DOTS_ID, BANG_ID, FIREWORKS_ID, NIGHT_ID, MODE_ID)
+LAYOUT_VERSION = 12  # bump to force a redraw after changing the layout above
 SOUND_ID = "sound"  # key for the sound asset in an asset plan (not a display element)
 SOUND_STATES = {"WAITING_FOR_INPUT": "waiting", "FINISHED": "finished"}  # state -> sound kind
 SOUND_COOLDOWN = 3.0  # seconds between sounds
@@ -213,6 +217,12 @@ def normalize_base_url(value: str) -> str:
 def valid_color(value: str, default: str) -> str:
     value = value.strip().upper()
     return value if re.fullmatch(r"#[0-9A-F]{8}", value) else default
+
+
+def scale_color(value: str, factor: float) -> str:
+    """`#RRGGBBAA` with its color channels scaled by `factor` (alpha kept)."""
+    channels = [int(int(value[i:i + 2], 16) * factor) for i in (1, 3, 5)]
+    return "#%02X%02X%02X%s" % (channels[0], channels[1], channels[2], value[7:9])
 
 
 def safe_label(value: str, default: str) -> str:
@@ -628,6 +638,7 @@ class BusyBarClient:
         should play; an element without an asset is simply not drawn.
         """
         assets = assets or {}
+        activity = activity or DEFAULT_SUBTITLES.get(status, "")
         text = safe_label(label or self.config.labels[status], DEFAULT_LABELS[status])
         rgba = valid_color(color or self.config.colors[status], DEFAULT_COLORS[status])
         config = self.config
@@ -673,7 +684,10 @@ class BusyBarClient:
         title_y = TITLE_Y if subtitle else TITLE_CENTER_Y
         wanted = {TITLE_ID: text_element(TITLE_ID, text, TITLE_FONT, title_y, rgba)}
         if subtitle:
-            wanted[SUBTITLE_ID] = text_element(SUBTITLE_ID, subtitle, SUBTITLE_FONT, SUBTITLE_Y, config.subtitle_color)
+            subtitle_color = config.subtitle_color
+            if status == "IDLE":  # the resting screen is calm: a dimmed subtitle
+                subtitle_color = scale_color(subtitle_color, IDLE_SUBTITLE_DIM)
+            wanted[SUBTITLE_ID] = text_element(SUBTITLE_ID, subtitle, SUBTITLE_FONT, SUBTITLE_Y, subtitle_color)
         for suffix_id, suffix_width, suffix_dy in (
             (DOTS_ID, busybar_anim.DOTS_WIDTH, 6),  # dots sit on the baseline
             (BANG_ID, busybar_anim.BANG_WIDTH, 2),  # the "!!" spans the caps
@@ -697,7 +711,9 @@ class BusyBarClient:
         if ANIMATION_ID in assets:
             wanted[ANIMATION_ID] = animation_element(ANIMATION_ID, COMET_X, ANIMATION_Y)
         if FIREWORKS_ID in assets:
-            wanted[FIREWORKS_ID] = animation_element(FIREWORKS_ID, FIREWORKS_X, 0)
+            wanted[FIREWORKS_ID] = animation_element(FIREWORKS_ID, SKY_X, 0)
+        if NIGHT_ID in assets:
+            wanted[NIGHT_ID] = animation_element(NIGHT_ID, SKY_X, 0)
         if config.mode_badge and mode in MODE_BADGES:
             word, word_color = MODE_BADGES[mode]
             wanted[MODE_ID] = {
@@ -896,6 +912,13 @@ def asset_plan(config: Config, status: str) -> Dict[str, Tuple[str, Callable[[],
     if status == "WAITING_FOR_INPUT" and config.waiting_dots:
         dots_color = config.colors[status]
         plan[DOTS_ID] = (busybar_anim.dots_asset_name(dots_color), lambda: busybar_anim.dots_animation(dots_color))
+    if status == "IDLE" and config.animation:
+        idle_color = config.colors[status]
+        plan[ANIMATION_ID] = (
+            busybar_anim.breath_asset_name(idle_color, COMET_WIDTH),
+            lambda: busybar_anim.breath_animation(idle_color, COMET_WIDTH),
+        )
+        plan[NIGHT_ID] = (busybar_anim.celebration_asset_name("night"), busybar_anim.night_animation)
     if status == "FINISHED" and config.animation:
         plan[BANG_ID] = (busybar_anim.celebration_asset_name("bang"), busybar_anim.bang_animation)
         plan[ANIMATION_ID] = (

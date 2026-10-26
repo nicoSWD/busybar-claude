@@ -125,7 +125,7 @@ A pixel-art Claude (orange, blocky, eyes as cut-outs) reacts to the state:
 | `FINISHED` | jumps twice in a shower of confetti, then waves with twinkling sparkles; the label flashes `!!`, a rainbow rail shimmers underneath and fireworks go off beside the text |
 | `ERROR` | dizzy X eyes, shakes, red `!`, a puff of smoke; the subtitle names the failure |
 | `READY` | waves hello, blinks, a `>_` prompt with a blinking cursor overhead |
-| `IDLE` | asleep and breathing, dim, little z's drifting up |
+| `IDLE` | asleep and breathing, dim, little z's drifting up; a night sky beside the text (see below) |
 
 The art is drawn procedurally in `scripts/busybar_mascot.py` (sprite, eye styles,
 and one frame builder per state), so it is easy to tweak; bump `MASCOT_VERSION`
@@ -186,6 +186,16 @@ highlight sweeping along it in the comet's slot, and fireworks bursting in the f
 to the right of the text (x 56-71, rows 0-11). Animation pixels are opaque, so each effect
 lives in space no text uses. `WORKING_ANIMATION=false` turns the rail, the `!!` and the
 fireworks off together with the other bottom animations.
+
+### Night scene
+
+`IDLE` (no session open) is the screen the bar rests on, so it is deliberately calm:
+the sleeping mascot, the title in a cool slate blue, `No session` underneath in a dimmed
+subtitle, a slow breathing glow along the bottom rail (a four second swell, brightest in
+the middle), and a night sky in the free area on the right: a crescent moon, stars twinkling
+at different speeds, and a shooting star streaking across every six seconds. It is the same
+corner the fireworks use, and everything is dim on purpose. `WORKING_ANIMATION=false` turns the
+glow and the sky off with the other bottom animations.
 
 ### Sounds
 
