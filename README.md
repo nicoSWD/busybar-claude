@@ -7,6 +7,37 @@ so status changes consume no model tokens.
 
 **[Install](#install)** takes two commands.
 
+**Contents**
+
+- [Install](#install)
+  - [Install with one command](#install-with-one-command)
+  - [Update and uninstall](#update-and-uninstall)
+- [Requirements](#requirements)
+- [Setup details](#setup-details)
+  - [Linux and Windows](#linux-and-windows)
+  - [Connect the BUSY Bar](#connect-the-busy-bar)
+  - [Point the plugin at the bar (LAN only)](#point-the-plugin-at-the-bar-lan-only)
+  - [Check that it works](#check-that-it-works)
+  - [Optional: plan usage on the READY screen](#optional-plan-usage-on-the-ready-screen)
+- [What the official APIs support](#what-the-official-apis-support)
+- [State behavior](#state-behavior)
+  - [Detection limits](#detection-limits)
+- [Display layout](#display-layout)
+  - [Mascot](#mascot)
+  - [Subtitle and comet](#subtitle-and-comet)
+  - [Celebration](#celebration)
+  - [Night scene](#night-scene)
+  - [Sounds](#sounds)
+  - [Permission-mode badge](#permission-mode-badge)
+  - [Waiting dots](#waiting-dots)
+  - [Regenerating the picture](#regenerating-the-picture)
+  - [How it is drawn](#how-it-is-drawn)
+- [Test the real connection](#test-the-real-connection)
+- [Automated tests](#automated-tests)
+- [Real-device validation procedure](#real-device-validation-procedure)
+- [Troubleshooting](#troubleshooting)
+- [References](#references)
+
 ![The bar while Claude is working: the mascot types behind a laptop, "WORKING" in blue, the current tool as a white subtitle, a comet sweeping along the bottom, and the permission mode ("AUTO") in the bottom-right corner](docs/working.gif)
 
 *The **WORKING** state on a real BUSY Bar (captured from the device, 2 s loop):
@@ -119,50 +150,17 @@ element.
 
 ## Setup details
 
-[Install](#install) is all most people need. This section covers other ways to
-install, connecting the bar over Wi-Fi, checking the result and the optional
+[Install](#install) is all most people need. This section covers Linux and Windows
+notes, connecting the bar over Wi-Fi, checking the result and the optional
 statusline.
 
-### Other ways to install
-
-To install from a clone instead (also the way to work on the plugin), put the
-folder in Claude Code's personal skills directory. Do not combine this with the
-marketplace install above: both would run the hooks.
-
-```sh
-mkdir -p ~/.claude/skills
-cp -R /path/to/busy-claude ~/.claude/skills/busy-claude
-# or: git clone https://github.com/nicoSWD/busybar-claude.git ~/.claude/skills/busy-claude
-```
-
-Claude Code loads every folder under `~/.claude/skills/` that has a
-`.claude-plugin/plugin.json` as a plugin, enabled by default, with the id
-`<manifest name>@skills-dir`: here `busy-claude@skills-dir`. Start a new Claude
-Code session (or run `/reload-plugins` in an open one), then confirm:
-
-```sh
-claude plugin list          # busy-claude@skills-dir should be listed as enabled
-```
-
-and run `/hooks` inside Claude Code to see the plugin's hooks. If it is missing,
-open `/plugin` and check the **Errors** tab. To uninstall, delete the folder.
-
-To try it for one session without installing it, point Claude Code at the folder:
-
-```sh
-claude --plugin-dir /path/to/busy-claude
-```
-
-`claude plugin validate .` checks the manifest. It passes, with one warning
-about the plugin name containing "claude"; that is cosmetic.
-
-#### Linux and Windows
+### Linux and Windows
 
 Development and real-device testing happened on macOS. Linux and Windows are
 supported by the code (the Windows paths are covered by unit tests that mock the
 Windows APIs) but have **not been run on real Linux or Windows machines**.
 
-**Linux.** The install is the same as above (`~/.claude/skills/busy-claude`).
+**Linux.** The install is the same as above.
 The plugin needs `python3` 3.9 or newer on `PATH` (the hooks run
 `python3 .../busybar_status.py hook`) and nothing else: no pip packages. State is
 kept in the plugin's data directory that Claude Code provides, or in the folder
@@ -177,8 +175,7 @@ USB network interface. If `./scripts/busybarctl check` cannot reach it, use the
 **Windows.** Native Windows works with Python 3.9 or newer and Claude Code
 running on Windows itself:
 
-1. Install the plugin into `%USERPROFILE%\.claude\skills\busy-claude`
-   (for example `git clone https://github.com/nicoSWD/busybar-claude.git "%USERPROFILE%\.claude\skills\busy-claude"`).
+1. Install the plugin as described [above](#install).
 2. Make sure a **`python3` executable is on `PATH`** (the PowerShell
    [install script](#install-with-one-command) checks this and offers to fix it). The hooks run `python3`
    directly, without a shell, and Claude Code's hook format has no per-OS command,
@@ -322,8 +319,7 @@ python3 "$(find ~/.claude/plugins/cache -name busybar_status.py -path '*busy-cla
 # undo:  ... statusline-uninstall
 ```
 
-(From a clone, or with `--plugin-dir`, run `scripts/busybarctl statusline-install`
-instead. The [install script](#install-with-one-command) asks about it, too, and
+(The [install script](#install-with-one-command) asks about it, too, and
 `/busy-claude:setup` can do it for you if you ask.) The wrapped command looks like
 this, and you can also write it into `settings.json` yourself:
 
