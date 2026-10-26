@@ -5,6 +5,8 @@ BUSY Bar front display. It uses Claude Code lifecycle hooks, shared per-plugin
 state, and BUSY Bar's HTTP API. It does not add tools or prompt instructions,
 so status changes consume no model tokens.
 
+**[Install](#install)** takes two commands.
+
 ![The bar while Claude is working: the mascot types behind a laptop, "WORKING" in blue, the current tool as a white subtitle, a comet sweeping along the bottom, and the permission mode ("AUTO") in the bottom-right corner](docs/working.gif)
 
 *The **WORKING** state on a real BUSY Bar (captured from the device, 2 s loop):
@@ -22,6 +24,290 @@ it is asking for, and the bar makes a short sound
 
 *Turn done: **FINISHED** with the turn time, a rainbow rail and fireworks
 (see [Celebration](#celebration)).*
+
+## Install
+
+You need Claude Code, Python 3.9 or newer, and a BUSY Bar. (On Windows, read
+[Linux and Windows](#linux-and-windows) first: Python needs a `python3.exe`.)
+
+1. Plug the BUSY Bar into your computer with a USB-C cable. There is nothing to configure.
+2. In Claude Code, add the marketplace and install the plugin:
+
+   ```text
+   /plugin marketplace add nicoSWD/busybar-claude
+   /plugin install busy-claude@busybar-claude
+   ```
+
+3. Run `/reload-plugins` (or start a new session). The bar now follows Claude.
+
+Claude Code may say that "userConfig options are not yet set". They are all
+optional, and the defaults are right for a bar on USB.
+
+Using Wi-Fi instead of USB, or the bar does not react? See
+[Connect the BUSY Bar](#connect-the-busy-bar) and [Troubleshooting](#troubleshooting).
+
+The same from a terminal:
+
+```sh
+claude plugin marketplace add nicoSWD/busybar-claude
+claude plugin install busy-claude@busybar-claude
+```
+
+### Update and uninstall
+
+```sh
+claude plugin update busy-claude@busybar-claude    # then /reload-plugins
+claude plugin uninstall busy-claude@busybar-claude
+claude plugin marketplace remove busybar-claude    # optional
+```
+
+Plugins from third-party marketplaces are not updated automatically. To turn it
+on, open `/plugin`, go to **Marketplaces**, select `busybar-claude` and choose
+**Enable auto-update**.
+
+## Requirements
+
+- macOS (primary target), Linux or Windows (see
+  [Linux and Windows](#linux-and-windows))
+- Claude Code with plugin support and the hook events in `hooks/hooks.json`
+- Python 3.9 or newer (the macOS `/usr/bin/python3` supplied by Xcode tools is
+  sufficient)
+- BUSY Bar with a current firmware/API
+
+The runtime uses only Python's standard library. Installing `busylib` is not
+required. The direct HTTP approach is the simplest reliable option here: the
+official API is language-independent, each update is one small request, and it
+avoids installing a package into Claude Code's runtime just to draw one text
+element.
+
+## Setup details
+
+[Install](#install) is all most people need. This section covers other ways to
+install, connecting the bar over Wi-Fi, checking the result and the optional
+statusline.
+
+### Other ways to install
+
+To install from a clone instead (also the way to work on the plugin), put the
+folder in Claude Code's personal skills directory. Do not combine this with the
+marketplace install above: both would run the hooks.
+
+```sh
+mkdir -p ~/.claude/skills
+cp -R /path/to/busy-claude ~/.claude/skills/busy-claude
+# or: git clone https://github.com/nicoSWD/busybar-claude.git ~/.claude/skills/busy-claude
+```
+
+Claude Code loads every folder under `~/.claude/skills/` that has a
+`.claude-plugin/plugin.json` as a plugin, enabled by default, with the id
+`<manifest name>@skills-dir`: here `busy-claude@skills-dir`. Start a new Claude
+Code session (or run `/reload-plugins` in an open one), then confirm:
+
+```sh
+claude plugin list          # busy-claude@skills-dir should be listed as enabled
+```
+
+and run `/hooks` inside Claude Code to see the plugin's hooks. If it is missing,
+open `/plugin` and check the **Errors** tab. To uninstall, delete the folder.
+
+To try it for one session without installing it, point Claude Code at the folder:
+
+```sh
+claude --plugin-dir /path/to/busy-claude
+```
+
+`claude plugin validate .` checks the manifest. It passes, with one warning
+about the plugin name containing "claude"; that is cosmetic.
+
+#### Linux and Windows
+
+Development and real-device testing happened on macOS. Linux and Windows are
+supported by the code (the Windows paths are covered by unit tests that mock the
+Windows APIs) but have **not been run on real Linux or Windows machines**.
+
+**Linux.** The install is the same as above (`~/.claude/skills/busy-claude`).
+The plugin needs `python3` 3.9 or newer on `PATH` (the hooks run
+`python3 .../busybar_status.py hook`) and nothing else: no pip packages. State is
+kept in the plugin's data directory that Claude Code provides, or in the folder
+named by `BUSYBAR_STATE_DIR`. Outside Claude Code (for example `busybarctl`)
+with neither variable set, it uses `$XDG_CACHE_HOME/claude-busy-bar`, which is
+`~/.cache/claude-busy-bar` by default.
+
+The USB address `http://10.0.4.20` only works if your system brings up the bar's
+USB network interface. If `./scripts/busybarctl check` cannot reach it, use the
+[LAN option](#option-b-lan-wi-fi) instead; it needs no USB driver.
+
+**Windows.** Native Windows works with Python 3.9 or newer and Claude Code
+running on Windows itself:
+
+1. Install the plugin into `%USERPROFILE%\.claude\skills\busy-claude`
+   (for example `git clone https://github.com/nicoSWD/busybar-claude.git "%USERPROFILE%\.claude\skills\busy-claude"`).
+2. Make sure a **`python3` executable is on `PATH`**. The hooks run `python3`
+   directly, without a shell, and Claude Code's hook format has no per-OS command,
+   so `python3` must resolve to a real `.exe`. Python from the Microsoft Store
+   provides `python3.exe`. The python.org installer provides `python.exe` and
+   `py.exe` but usually not `python3.exe`: copy `python.exe` to `python3.exe` in
+   the same folder, or put a `python3.exe` copy in a folder on `PATH`. Check with
+   `python3 --version` in a new terminal. If it is missing, the hooks fail
+   (Claude Code is not blocked, but the bar will not update).
+3. Run the CLI helper as `scripts\busybarctl.cmd` instead of `./scripts/busybarctl`,
+   for example `scripts\busybarctl.cmd check`.
+4. State is kept in the plugin data directory Claude Code provides, or in
+   `%LOCALAPPDATA%\claude-busy-bar` when you run the script outside Claude Code.
+   `BUSYBAR_STATE_DIR` overrides both.
+5. Whether the bar's USB network interface comes up on Windows depends on its
+   driver. If `scripts\busybarctl.cmd check` cannot reach `10.0.4.20`, use the
+   [LAN option](#option-b-lan-wi-fi).
+
+On Windows the state lock uses `msvcrt.locking`, the background update and
+reaper processes start detached from the hook (without a console window), and
+hook input is read as UTF-8 regardless of the console code page.
+
+WSL2 also works: run Claude Code inside WSL and follow the Linux steps, with the
+plugin under the WSL home directory. The bar's USB network interface is attached
+to Windows, not to WSL, so connect the bar over
+[LAN](#option-b-lan-wi-fi) and use
+`./scripts/busybarctl --url <bar-address> --auth wifi check`.
+
+### Connect the BUSY Bar
+
+#### Option A: USB (default, nothing to configure)
+
+1. Plug the BUSY Bar into your Mac with a USB-C cable.
+2. The bar appears as a network device and answers at `http://10.0.4.20`. USB is
+   treated as a secure channel, so there is no password.
+3. Check the link:
+
+   ```sh
+   ./scripts/busybarctl check
+   ```
+
+   It prints the API version (for example `{"api_semver": "27.5.0"}`). The
+   plugin's defaults already point at this address, so you can go straight to
+   [the check](#check-that-it-works).
+
+The bar must stay connected. If it is unplugged, status updates are silently
+dropped; Claude Code is never blocked or slowed by it.
+
+#### Option B: LAN (Wi-Fi)
+
+Use this when the bar is not plugged into the computer that runs Claude Code,
+for example when it sits on a desk and is powered from a wall adapter.
+
+1. **Join Wi-Fi.** Connect the bar to your network on the device
+   (Settings → Wi-Fi).
+2. **Enable API access, once, over USB.** Wi-Fi API access is off by default.
+   Connect the bar by USB, open `http://10.0.4.20` in a browser, go to the
+   **Network** tab, find the **HTTP API** section, turn on **HTTP API access**,
+   then click **Set password and enable** and choose a password.
+3. **Find the bar's IP address.** On the device: Settings → Wi-Fi → your network
+   name → View IP Address. Give the bar a fixed address (a DHCP reservation in
+   your router) so the setting does not go stale.
+4. **Check the link** from the machine that runs Claude Code. Keep the password
+   out of your shell history by passing it through the environment:
+
+   ```sh
+   export BUSYBAR_AUTH_TOKEN='your-api-password'
+   ./scripts/busybarctl --url 192.168.1.20 --auth wifi check
+   ```
+
+   `--url` accepts a bare IP, a host name, or a full `http://IP/api` URL. A
+   JSON version reply means it works; a timeout means the bar is not reachable
+   (check the IP, and that both devices are on the same network); HTTP 403 means
+   a wrong password.
+
+The password is sent in the clear as an `X-API-Token` header over plain HTTP, so
+only use LAN access on a network you trust. (A third mode, `cloud`, goes through
+the BUSY cloud with an account API token; see the table at the top.)
+
+### Point the plugin at the bar (LAN only)
+
+USB works with the defaults. For LAN, set the plugin's options in Claude Code:
+run `/plugin configure busy-claude@busybar-claude`, or run `/plugin`, open the
+**Installed** tab, select `busy-claude`, and choose **Configure options**.
+
+| Option | USB (default) | LAN |
+| --- | --- | --- |
+| Device URL | `http://10.0.4.20/api` | `http://192.168.1.20/api` (your bar's IP) |
+| Authentication mode | `usb` | `wifi` |
+| Authentication token | empty | the API password from the Wi-Fi setup above |
+
+The token is declared sensitive, so Claude Code masks it and keeps it in the
+platform's secure credential store; it is never written to the plugin's state
+file or committed anywhere. Closing the panel applies the change; if it does
+not take effect, run `/reload-plugins`.
+
+The same dialog has everything else you can change: enable or disable updates,
+the request and stale-session timeouts, the label and `#RRGGBBAA` color of each
+of the seven states, the subtitle color (default white), the mascot, the
+working comet, the waiting dots, the permission-mode badge, the sounds and the finished-sound
+threshold, and debug logging. Non-sensitive options also show up as rows in
+`/config`. Debug logs go to `debug.log` under `CLAUDE_PLUGIN_DATA`; hooks never
+print connection failures into the conversation.
+
+Outside Claude Code (for the `busybarctl` helper, or as a fallback), the same
+options are read from `BUSYBAR_DEVICE_URL`, `BUSYBAR_AUTH_MODE`,
+`BUSYBAR_AUTH_TOKEN`, `BUSYBAR_MASCOT`, and so on: the option name, upper case,
+with a `BUSYBAR_` prefix.
+
+### Check that it works
+
+1. Run the demo. It walks through all seven states, five seconds each, and the
+   first run uploads the animations to the bar:
+
+   ```sh
+   ./scripts/busybarctl demo
+   ```
+
+2. Start a new Claude Code session. The bar shows **READY** with the `>_`
+   mascot. Send a prompt: it switches to **WORKING** with the typing mascot, the
+   current tool as a subtitle, and the comet, as in the picture above.
+3. Nothing happens? Turn on the **Debug logging** option, reproduce it, and read
+   `debug.log`. The [troubleshooting](#troubleshooting) section covers the usual
+   causes (unreachable bar, wrong password, a magenta box, missing animation).
+
+### Optional: plan usage on the READY screen
+
+Claude Code's statusline receives data that hooks do not: your plan usage (the
+5-hour and 7-day windows, Claude Pro and Max only), the model, the reasoning
+effort and context-window usage. A plugin cannot set `statusLine` itself, so
+this part is opt-in: you point your own `statusLine` at the plugin's wrapper,
+which records the data and then runs your existing statusline command with the
+same input, so what you see in the terminal does not change.
+
+Add this to `~/.claude/settings.json`, replacing the text after `--next` with your
+current `statusLine` command (leave `--next` out if you have none):
+
+```json
+{
+  "statusLine": {
+    "type": "command",
+    "command": "python3 ~/.claude/skills/busy-claude/scripts/busybar_status.py statusline --next \"your-current-statusline-command\""
+  }
+}
+```
+
+On Windows use the full path to the script instead of `~`.
+
+What it does:
+
+- The `READY` screen (a session is open and waiting for its first prompt) shows
+  plan usage as the subtitle, for example `5h15% 7d3%`: the share of each window
+  used so far. A window whose reset time has passed is left out until fresh data
+  arrives. The other screens are unchanged.
+- The wrapper never draws on the bar. It only saves the data, and the next hook
+  event shows it. Plan usage is account-wide, so the last value stays available
+  across sessions.
+- Per session it also stores the model, effort and context percentage. They are
+  not drawn yet; `./scripts/busybarctl state` shows them under `meta`, and plan
+  usage under `quota`.
+- The statusline is not a plugin hook, so it does not get the plugin's data
+  directory. The plugin writes the directory its hooks use to
+  `hook-state-dir` in the default cache folder at every `SessionStart`, and the
+  wrapper reads it from there. Set `BUSYBAR_STATE_DIR` for both if you want to
+  choose it yourself.
+- Claude Code skips a statusline until the folder is trusted, and plan usage
+  only appears after the first response of a session.
 
 ## What the official APIs support
 
@@ -130,7 +416,7 @@ no hook. It never uses timers to guess.
 x 0-15    mascot      16x16 looping animation, one per state
           text        centered on the whole display
             rows 1-5    WORKING          small font, state color (rows 6-10, centered, when alone)
-            rows 8-11   Editing          tiny font, white (WORKING only; plan usage such as 5h15% 7d3% on READY, see step 5)
+            rows 8-11   Editing          tiny font, white (WORKING only; plan usage such as 5h15% 7d3% on READY, see the optional statusline setup)
             rows 14-15  comet            32px wide under the text, x 20-51 (WORKING only)
 x 55-71   rows 12-15 permission-mode badge, colored text (not shown in the default mode)
 x 56-71   rows 0-11  fireworks (FINISHED only)
@@ -319,247 +605,6 @@ Design constraints learned from the device, all handled in
   color or art change leaves the old file behind (a few KB).
 - Font and position constants sit at the top of the script; bump
   `LAYOUT_VERSION` after changing them.
-
-## Requirements
-
-- macOS (primary target), Linux or Windows (see
-  [Linux and Windows](#linux-and-windows))
-- Claude Code with plugin support and the hook events in `hooks/hooks.json`
-- Python 3.9 or newer (the macOS `/usr/bin/python3` supplied by Xcode tools is
-  sufficient)
-- BUSY Bar with a current firmware/API
-
-The runtime uses only Python's standard library. Installing `busylib` is not
-required. The direct HTTP approach is the simplest reliable option here: the
-official API is language-independent, each update is one small request, and it
-avoids installing a package into Claude Code's runtime just to draw one text
-element.
-
-## Setup
-
-Four steps, plus an optional fifth: install the plugin, connect the bar (USB or LAN),
-tell the plugin where the bar is (LAN only), and check that it works.
-
-### 1. Install the plugin
-
-Put this folder in Claude Code's personal skills directory:
-
-```sh
-mkdir -p ~/.claude/skills
-cp -R /path/to/busy-claude ~/.claude/skills/busy-claude
-# or: git clone <repository-url> ~/.claude/skills/busy-claude
-```
-
-Claude Code loads every folder under `~/.claude/skills/` that has a
-`.claude-plugin/plugin.json` as a plugin, enabled by default, with the id
-`<manifest name>@skills-dir`: here `busy-claude@skills-dir`. Start a new Claude
-Code session (or run `/reload-plugins` in an open one), then confirm:
-
-```sh
-claude plugin list          # busy-claude@skills-dir should be listed as enabled
-```
-
-and run `/hooks` inside Claude Code to see the plugin's hooks. If it is missing,
-open `/plugin` and check the **Errors** tab. To uninstall, delete the folder.
-
-To try it for one session without installing it, point Claude Code at the folder:
-
-```sh
-claude --plugin-dir /path/to/busy-claude
-```
-
-`claude plugin validate .` checks the manifest. It passes, with one warning
-about the plugin name containing "claude"; that is cosmetic.
-
-#### Linux and Windows
-
-Development and real-device testing happened on macOS. Linux and Windows are
-supported by the code (the Windows paths are covered by unit tests that mock the
-Windows APIs) but have **not been run on real Linux or Windows machines**.
-
-**Linux.** The install is the same as above (`~/.claude/skills/busy-claude`).
-The plugin needs `python3` 3.9 or newer on `PATH` (the hooks run
-`python3 .../busybar_status.py hook`) and nothing else: no pip packages. State is
-kept in the plugin's data directory that Claude Code provides, or in the folder
-named by `BUSYBAR_STATE_DIR`. Outside Claude Code (for example `busybarctl`)
-with neither variable set, it uses `$XDG_CACHE_HOME/claude-busy-bar`, which is
-`~/.cache/claude-busy-bar` by default.
-
-The USB address `http://10.0.4.20` only works if your system brings up the bar's
-USB network interface. If `./scripts/busybarctl check` cannot reach it, use the
-[LAN option](#option-b-lan-wi-fi) instead; it needs no USB driver.
-
-**Windows.** Native Windows works with Python 3.9 or newer and Claude Code
-running on Windows itself:
-
-1. Install the plugin into `%USERPROFILE%\.claude\skills\busy-claude`
-   (for example `git clone <repository-url> "%USERPROFILE%\.claude\skills\busy-claude"`).
-2. Make sure a **`python3` executable is on `PATH`**. The hooks run `python3`
-   directly, without a shell, and Claude Code's hook format has no per-OS command,
-   so `python3` must resolve to a real `.exe`. Python from the Microsoft Store
-   provides `python3.exe`. The python.org installer provides `python.exe` and
-   `py.exe` but usually not `python3.exe`: copy `python.exe` to `python3.exe` in
-   the same folder, or put a `python3.exe` copy in a folder on `PATH`. Check with
-   `python3 --version` in a new terminal. If it is missing, the hooks fail
-   (Claude Code is not blocked, but the bar will not update).
-3. Run the CLI helper as `scripts\busybarctl.cmd` instead of `./scripts/busybarctl`,
-   for example `scripts\busybarctl.cmd check`.
-4. State is kept in the plugin data directory Claude Code provides, or in
-   `%LOCALAPPDATA%\claude-busy-bar` when you run the script outside Claude Code.
-   `BUSYBAR_STATE_DIR` overrides both.
-5. Whether the bar's USB network interface comes up on Windows depends on its
-   driver. If `scripts\busybarctl.cmd check` cannot reach `10.0.4.20`, use the
-   [LAN option](#option-b-lan-wi-fi).
-
-On Windows the state lock uses `msvcrt.locking`, the background update and
-reaper processes start detached from the hook (without a console window), and
-hook input is read as UTF-8 regardless of the console code page.
-
-WSL2 also works: run Claude Code inside WSL and follow the Linux steps, with the
-plugin under the WSL home directory. The bar's USB network interface is attached
-to Windows, not to WSL, so connect the bar over
-[LAN](#option-b-lan-wi-fi) and use
-`./scripts/busybarctl --url <bar-address> --auth wifi check`.
-
-### 2. Connect the BUSY Bar
-
-#### Option A: USB (default, nothing to configure)
-
-1. Plug the BUSY Bar into your Mac with a USB-C cable.
-2. The bar appears as a network device and answers at `http://10.0.4.20`. USB is
-   treated as a secure channel, so there is no password.
-3. Check the link:
-
-   ```sh
-   ./scripts/busybarctl check
-   ```
-
-   It prints the API version (for example `{"api_semver": "27.5.0"}`). The
-   plugin's defaults already point at this address, so you can go straight to
-   [step 4](#4-check-that-it-works).
-
-The bar must stay connected. If it is unplugged, status updates are silently
-dropped; Claude Code is never blocked or slowed by it.
-
-#### Option B: LAN (Wi-Fi)
-
-Use this when the bar is not plugged into the computer that runs Claude Code,
-for example when it sits on a desk and is powered from a wall adapter.
-
-1. **Join Wi-Fi.** Connect the bar to your network on the device
-   (Settings → Wi-Fi).
-2. **Enable API access, once, over USB.** Wi-Fi API access is off by default.
-   Connect the bar by USB, open `http://10.0.4.20` in a browser, go to the
-   **Network** tab, find the **HTTP API** section, turn on **HTTP API access**,
-   then click **Set password and enable** and choose a password.
-3. **Find the bar's IP address.** On the device: Settings → Wi-Fi → your network
-   name → View IP Address. Give the bar a fixed address (a DHCP reservation in
-   your router) so the setting does not go stale.
-4. **Check the link** from the machine that runs Claude Code. Keep the password
-   out of your shell history by passing it through the environment:
-
-   ```sh
-   export BUSYBAR_AUTH_TOKEN='your-api-password'
-   ./scripts/busybarctl --url 192.168.1.20 --auth wifi check
-   ```
-
-   `--url` accepts a bare IP, a host name, or a full `http://IP/api` URL. A
-   JSON version reply means it works; a timeout means the bar is not reachable
-   (check the IP, and that both devices are on the same network); HTTP 403 means
-   a wrong password.
-
-The password is sent in the clear as an `X-API-Token` header over plain HTTP, so
-only use LAN access on a network you trust. (A third mode, `cloud`, goes through
-the BUSY cloud with an account API token; see the table at the top.)
-
-### 3. Point the plugin at the bar (LAN only)
-
-USB works with the defaults. For LAN, set the plugin's options in Claude Code:
-run `/plugin`, open the **Installed** tab, select `busy-claude`, and choose
-**Configure options**.
-
-| Option | USB (default) | LAN |
-| --- | --- | --- |
-| Device URL | `http://10.0.4.20/api` | `http://192.168.1.20/api` (your bar's IP) |
-| Authentication mode | `usb` | `wifi` |
-| Authentication token | empty | the API password from step 2 |
-
-The token is declared sensitive, so Claude Code masks it and keeps it in the
-platform's secure credential store; it is never written to the plugin's state
-file or committed anywhere. Closing the panel applies the change; if it does
-not take effect, run `/reload-plugins`.
-
-The same dialog has everything else you can change: enable or disable updates,
-the request and stale-session timeouts, the label and `#RRGGBBAA` color of each
-of the seven states, the subtitle color (default white), the mascot, the
-working comet, the waiting dots, the permission-mode badge, the sounds and the finished-sound
-threshold, and debug logging. Non-sensitive options also show up as rows in
-`/config`. Debug logs go to `debug.log` under `CLAUDE_PLUGIN_DATA`; hooks never
-print connection failures into the conversation.
-
-Outside Claude Code (for the `busybarctl` helper, or as a fallback), the same
-options are read from `BUSYBAR_DEVICE_URL`, `BUSYBAR_AUTH_MODE`,
-`BUSYBAR_AUTH_TOKEN`, `BUSYBAR_MASCOT`, and so on: the option name, upper case,
-with a `BUSYBAR_` prefix.
-
-### 4. Check that it works
-
-1. Run the demo. It walks through all seven states, five seconds each, and the
-   first run uploads the animations to the bar:
-
-   ```sh
-   ./scripts/busybarctl demo
-   ```
-
-2. Start a new Claude Code session. The bar shows **READY** with the `>_`
-   mascot. Send a prompt: it switches to **WORKING** with the typing mascot, the
-   current tool as a subtitle, and the comet, as in the picture above.
-3. Nothing happens? Turn on the **Debug logging** option, reproduce it, and read
-   `debug.log`. The [troubleshooting](#troubleshooting) section covers the usual
-   causes (unreachable bar, wrong password, a magenta box, missing animation).
-
-### 5. Optional: plan usage on the READY screen
-
-Claude Code's statusline receives data that hooks do not: your plan usage (the
-5-hour and 7-day windows, Claude Pro and Max only), the model, the reasoning
-effort and context-window usage. A plugin cannot set `statusLine` itself, so
-this part is opt-in: you point your own `statusLine` at the plugin's wrapper,
-which records the data and then runs your existing statusline command with the
-same input, so what you see in the terminal does not change.
-
-Add this to `~/.claude/settings.json`, replacing the text after `--next` with your
-current `statusLine` command (leave `--next` out if you have none):
-
-```json
-{
-  "statusLine": {
-    "type": "command",
-    "command": "python3 ~/.claude/skills/busy-claude/scripts/busybar_status.py statusline --next \"your-current-statusline-command\""
-  }
-}
-```
-
-On Windows use the full path to the script instead of `~`.
-
-What it does:
-
-- The `READY` screen (a session is open and waiting for its first prompt) shows
-  plan usage as the subtitle, for example `5h15% 7d3%`: the share of each window
-  used so far. A window whose reset time has passed is left out until fresh data
-  arrives. The other screens are unchanged.
-- The wrapper never draws on the bar. It only saves the data, and the next hook
-  event shows it. Plan usage is account-wide, so the last value stays available
-  across sessions.
-- Per session it also stores the model, effort and context percentage. They are
-  not drawn yet; `./scripts/busybarctl state` shows them under `meta`, and plan
-  usage under `quota`.
-- The statusline is not a plugin hook, so it does not get the plugin's data
-  directory. The plugin writes the directory its hooks use to
-  `hook-state-dir` in the default cache folder at every `SessionStart`, and the
-  wrapper reads it from there. Set `BUSYBAR_STATE_DIR` for both if you want to
-  choose it yourself.
-- Claude Code skips a statusline until the folder is trusted, and plan usage
-  only appears after the first response of a session.
 
 ## Test the real connection
 

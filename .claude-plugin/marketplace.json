@@ -1,0 +1,17 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "busybar-claude",
+  "description": "Show what Claude Code is doing on a BUSY Bar desk display.",
+  "owner": {
+    "name": "Nico Oelgart",
+    "url": "https://github.com/nicoSWD"
+  },
+  "plugins": [
+    {
+      "name": "busy-claude",
+      "description": "Mirror Claude Code's lifecycle state (working, waiting, limit, finished, error, ready, idle) on a BUSY Bar front display using lifecycle hooks. No model tokens consumed.",
+      "source": "./",
+      "category": "productivity"
+    }
+  ]
+}

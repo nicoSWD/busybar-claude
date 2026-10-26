@@ -1,11 +1,21 @@
 {
   "name": "busy-claude",
-  "version": "1.0.0",
   "description": "Mirror Claude Code's lifecycle state (working, waiting, limit, finished, error, ready, idle) on a BUSY Bar front display using lifecycle hooks. No model tokens consumed.",
   "icon": "./.claude-plugin/icon.png",
   "author": {
-    "name": "Claude BUSY Bar contributors"
+    "name": "Nico Oelgart",
+    "url": "https://github.com/nicoSWD"
   },
+  "homepage": "https://github.com/nicoSWD/busybar-claude",
+  "repository": "https://github.com/nicoSWD/busybar-claude",
+  "license": "MIT",
+  "keywords": [
+    "busy-bar",
+    "status",
+    "display",
+    "hooks",
+    "led"
+  ],
   "userConfig": {
     "DEVICE_URL": {
       "type": "string",
