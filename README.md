@@ -187,6 +187,32 @@ to the right of the text (x 56-71, rows 0-11). Animation pixels are opaque, so e
 lives in space no text uses. `WORKING_ANIMATION=false` turns the rail, the `!!` and the
 fireworks off together with the other bottom animations.
 
+### Sounds
+
+The bar has a speaker, so the two moments you most want to notice from across the room
+make a short sound:
+
+| When | Sound |
+| --- | --- |
+| The bar changes to `WAITING` (a permission, a question, plan approval, the idle reminder) | a two-note "ding-dong" |
+| The bar changes to `FINISHED` after a turn that took at least 20 seconds | a bright rising chime |
+
+A sound plays when the state *changes*, never on a redraw (a new subtitle or a mode change is
+silent), and at most once every 3 seconds. Quick replies stay silent because the finished chime
+needs a turn of at least `SOUND_MIN_SECONDS` (default 20). Set `SOUNDS` to `false` to turn all
+sounds off.
+
+The sounds are synthesized by `scripts/busybar_sound.py` (bell-like tones, pure Python) as
+`.snd` files, which are raw 16-bit mono 44.1 kHz PCM, and uploaded once like the animations.
+The device volume is a single global setting shared with the bar's other apps, so the plugin
+never changes it. The sounds are quiet by construction instead (`GAIN` in the sound module is
+the peak level, 25% of full scale); if they are still too loud or too soft, change the device
+volume in its settings or edit `GAIN`. Playing is best effort and happens after the display is
+updated: a failed upload or play is logged and never delays or breaks the visuals.
+
+Audition them with `busybarctl sound waiting` and `busybarctl sound finished`; `demo` plays
+them too.
+
 ### Permission-mode badge
 
 Claude Code reports the session's permission mode in the hook input (`permission_mode`),
@@ -382,7 +408,8 @@ not take effect, run `/reload-plugins`.
 The same dialog has everything else you can change: enable or disable updates,
 the request and stale-session timeouts, the label and `#RRGGBBAA` color of each
 of the seven states, the subtitle color (default white), the mascot, the
-working comet, the waiting dots, the permission-mode badge, and debug logging. Non-sensitive options also show up as rows in
+working comet, the waiting dots, the permission-mode badge, the sounds and the finished-sound
+threshold, and debug logging. Non-sensitive options also show up as rows in
 `/config`. Debug logs go to `debug.log` under `CLAUDE_PLUGIN_DATA`; hooks never
 print connection failures into the conversation.
 
@@ -446,7 +473,8 @@ Send one state, optionally overriding its appearance:
 ./scripts/busybarctl --url 10.0.4.20 send WAITING_FOR_INPUT \
   --label 'YOUR TURN' --color '#FF8000FF'
 ./scripts/busybarctl --url 10.0.4.20 send WORKING --activity Editing
-./scripts/busybarctl --url 10.0.4.20 assets   # install the mascot and comet animations if missing
+./scripts/busybarctl --url 10.0.4.20 assets   # install the animations and sounds if missing
+./scripts/busybarctl --url 10.0.4.20 sound waiting   # or: finished
 ```
 
 `demo` sends `WORKING`, `WAITING_FOR_INPUT` and `LIMIT` (each with a sample subtitle), `FINISHED`,
@@ -501,6 +529,13 @@ credentials require the real-device checks above.
 The animation element points at an asset the device does not have (for example
 after a factory reset). Run `busybarctl assets`; every state change also
 re-checks and re-uploads what it needs.
+
+**No sound**
+
+Check the device volume (`curl http://10.0.4.20/api/audio/volume`), then run
+`busybarctl sound waiting`. If that plays but real events do not, remember that FINISHED is
+silent for turns shorter than `SOUND_MIN_SECONDS` and that sounds are rate limited to one
+every 3 seconds. Enable debug logging and look for `played waiting` / `sound ... failed`.
 
 **The bar shows text but no mascot or comet**
 

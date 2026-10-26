@@ -163,6 +163,18 @@
       "description": "Show a small badge in the top-right corner for the current permission mode (PLAN, EDIT, AUTO, LOCK, RISK). Nothing is shown in the default mode.",
       "default": true
     },
+    "SOUNDS": {
+      "type": "boolean",
+      "title": "Sounds",
+      "description": "Play a short sound on the bar when Claude starts waiting for you and when a long turn finishes. The plugin never changes the device volume.",
+      "default": true
+    },
+    "SOUND_MIN_SECONDS": {
+      "type": "string",
+      "title": "Finished-sound threshold",
+      "description": "Only play the finished sound after a turn that took at least this many seconds (0-3600).",
+      "default": "20"
+    },
     "WORKING_ANIMATION": {
       "type": "boolean",
       "title": "Bottom animation",

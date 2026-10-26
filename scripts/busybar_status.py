@@ -27,6 +27,7 @@ from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Seque
 import busybar_anim
 import busybar_font
 import busybar_mascot
+import busybar_sound
 
 
 STATUSES = ("WORKING", "WAITING_FOR_INPUT", "LIMIT", "FINISHED", "ERROR", "READY", "IDLE")
@@ -166,6 +167,9 @@ MASCOT_WIDTH = busybar_mascot.SIZE
 DISPLAY_WIDTH = 72
 MANAGED_IDS = (TITLE_ID, SUBTITLE_ID, MASCOT_ID, ANIMATION_ID, DOTS_ID, BANG_ID, FIREWORKS_ID, MODE_ID)
 LAYOUT_VERSION = 10  # bump to force a redraw after changing the layout above
+SOUND_ID = "sound"  # key for the sound asset in an asset plan (not a display element)
+SOUND_STATES = {"WAITING_FOR_INPUT": "waiting", "FINISHED": "finished"}  # state -> sound kind
+SOUND_COOLDOWN = 3.0  # seconds between sounds
 DEMO_SUBTITLES = {
     "WORKING": "Editing",
     "WAITING_FOR_INPUT": "Allow Bash?",
@@ -234,6 +238,8 @@ class Config:
     mascot: bool = True
     waiting_dots: bool = True
     mode_badge: bool = True
+    sounds: bool = True
+    sound_min_seconds: float = 20.0
     subtitle_color: str = SUBTITLE_COLOR
 
     @property
@@ -278,6 +284,8 @@ class Config:
             mascot=_as_bool(_env("MASCOT", "true"), True),
             waiting_dots=_as_bool(_env("WAITING_DOTS", "true"), True),
             mode_badge=_as_bool(_env("MODE_BADGE", "true"), True),
+            sounds=_as_bool(_env("SOUNDS", "true"), True),
+            sound_min_seconds=_as_float(_env("SOUND_MIN_SECONDS", "20"), 20.0, 0.0, 3600.0),
             subtitle_color=valid_color(_env("SUBTITLE_COLOR", SUBTITLE_COLOR), SUBTITLE_COLOR),
         )
 
@@ -484,6 +492,16 @@ def aggregate_mode(sessions: Mapping[str, Mapping[str, Any]], state: str) -> str
     return str(latest.get("mode", ""))
 
 
+def aggregate_turn_seconds(sessions: Mapping[str, Mapping[str, Any]], state: str) -> Optional[float]:
+    """How long the finished turn took, for the session that decides what the bar shows."""
+    candidates = [item for item in sessions.values() if item.get("state") == state]
+    if not candidates:
+        return None
+    latest = max(candidates, key=lambda item: float(item.get("updated_at", 0)))
+    value = latest.get("turn_seconds")
+    return float(value) if value is not None else None
+
+
 def apply_event(store: Store, payload: Mapping[str, Any], now: Optional[float] = None) -> Tuple[str, bool]:
     now = time.time() if now is None else now
     event = str(payload.get("hook_event_name", ""))
@@ -541,6 +559,8 @@ def apply_event(store: Store, payload: Mapping[str, Any], now: Optional[float] =
                         detail = old.get("resume_activity")
                     else:
                         detail = finished_subtitle(now - turn_started) if turn_started is not None else None
+                        if turn_started is not None:
+                            record["turn_seconds"] = now - turn_started
                 else:
                     detail = waiting_subtitle(payload)
                 if event == "Notification" and old.get("state") == state and old.get("activity"):
@@ -807,6 +827,14 @@ class BusyBarClient:
             if isinstance(item, dict) and item.get("type") == "file" and "name" in item
         }
 
+    def play(self, name: str) -> None:
+        """Play an uploaded sound asset on the bar's speaker."""
+        body = {"application_name": self.config.application_name, "path": name}
+        self.request(
+            "POST", "/audio/play", body=json.dumps(body, separators=(",", ":")).encode("utf-8"),
+            content_type="application/json",
+        )
+
     def install_asset(self, name: str, blob: bytes) -> None:
         """Upload `blob` as `name`.
 
@@ -951,6 +979,37 @@ def resolve_assets(
     return ready
 
 
+def play_sound(config: Config, store: Optional[Store], client: BusyBarClient, kind: str) -> bool:
+    """Make sure the sound is on the bar (uploaded once, versioned) and play it. Never raises."""
+    try:
+        name = busybar_sound.sound_asset_name(kind)
+        plan = {SOUND_ID: (name, lambda: busybar_sound.sound(kind))}
+        if SOUND_ID not in resolve_assets(config, store, client, plan):
+            return False
+        client.play(name)
+        log(config, "played %s" % kind)
+        return True
+    except Exception as error:
+        log(config, "sound %s failed: %s: %s" % (kind, type(error).__name__, error))
+        return False
+
+
+def sound_due(
+    config: Config,
+    status: str,
+    previous_status: Optional[str],
+    turn_seconds: Optional[float],
+    last_sound_at: float,
+    now: float,
+) -> bool:
+    """A sound plays when the bar changes into WAITING, or into FINISHED after a long enough turn."""
+    if not config.sounds or status not in SOUND_STATES or status == previous_status:
+        return False
+    if status == "FINISHED" and (turn_seconds is None or turn_seconds < config.sound_min_seconds):
+        return False
+    return now - last_sound_at >= SOUND_COOLDOWN
+
+
 def dispatch(config: Config, force: bool = False, delay: float = 0.04) -> bool:
     if not config.enabled:
         return True
@@ -964,6 +1023,9 @@ def dispatch(config: Config, force: bool = False, delay: float = 0.04) -> bool:
             status = aggregate_state(data["sessions"])
             activity = aggregate_activity(data["sessions"], status)
             mode = aggregate_mode(data["sessions"], status)
+            turn_seconds = aggregate_turn_seconds(data["sessions"], status)
+            previous_status = data.get("last_status")
+            last_sound_at = float(data.get("last_sound_at", 0))
             fingerprint = render_fingerprint(config, status, activity, mode)
             if not force and data.get("last_sent") == fingerprint:
                 store.save_unlocked(data)
@@ -985,6 +1047,7 @@ def dispatch(config: Config, force: bool = False, delay: float = 0.04) -> bool:
         with store.lock():
             latest = store.load_unlocked()
             latest["drawn"] = drawn
+            latest["last_status"] = status
             latest_status = aggregate_state(latest["sessions"])
             latest_activity = aggregate_activity(latest["sessions"], latest_status)
             latest_mode = aggregate_mode(latest["sessions"], latest_status)
@@ -992,6 +1055,15 @@ def dispatch(config: Config, force: bool = False, delay: float = 0.04) -> bool:
                 latest["last_sent"] = fingerprint
             store.save_unlocked(latest)
         log(config, "sent %s %s" % (status, activity))
+        now = time.time()
+        if sound_due(config, status, previous_status, turn_seconds, last_sound_at, now) and play_sound(
+            config, store, client, SOUND_STATES[status]
+        ):
+            with contextlib.suppress(Exception):
+                with store.lock():
+                    latest = store.load_unlocked()
+                    latest["last_sound_at"] = now
+                    store.save_unlocked(latest)
         return True
 
 
@@ -1121,7 +1193,9 @@ def build_parser() -> argparse.ArgumentParser:
     send.add_argument("--activity", default="", help="one-off subtitle under the status label")
     send.add_argument("--mode", default="", choices=[""] + list(MODE_BADGES), help="one-off permission-mode badge")
     subparsers.add_parser("demo", help="send every status in sequence")
-    subparsers.add_parser("assets", help="install the mascot and WORKING animations on the device if missing")
+    subparsers.add_parser("assets", help="install the animations and sounds on the device if missing")
+    sound = subparsers.add_parser("sound", help="play one of the notification sounds on the bar")
+    sound.add_argument("kind", choices=sorted(busybar_sound.KINDS))
     subparsers.add_parser("state", help="print the shared session state")
     subparsers.add_parser("_dispatch")
     subparsers.add_parser("_reaper")
@@ -1173,6 +1247,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                 assets = resolve_assets(config, None, client, asset_plan(config, status))
                 client.send(status, activity=DEMO_SUBTITLES.get(status, ""), assets=assets)
                 print("Sent " + status)
+                if config.sounds and status in SOUND_STATES:
+                    play_sound(config, None, client, SOUND_STATES[status])
                 if status != STATUSES[-1]:
                     time.sleep(5)
             forget_drawn(config)
@@ -1180,6 +1256,13 @@ def main(argv: Optional[list[str]] = None) -> int:
         except Exception as error:
             print("BUSY Bar demo failed: %s: %s" % (type(error).__name__, error), file=sys.stderr)
             return 1
+    if args.command == "sound":
+        client = BusyBarClient(config)
+        if not play_sound(config, None, client, args.kind):
+            print("BUSY Bar sound failed (enable DEBUG_LOGGING for details)", file=sys.stderr)
+            return 1
+        print("Played %s" % args.kind)
+        return 0
     if args.command == "assets":
         try:
             client = BusyBarClient(config)
@@ -1190,6 +1273,14 @@ def main(argv: Optional[list[str]] = None) -> int:
                 missing += len(plan) - len(ready)
                 for name in sorted(set(ready.values())):
                     print("ready  " + name)
+            if config.sounds:
+                for kind in sorted(busybar_sound.KINDS):
+                    name = busybar_sound.sound_asset_name(kind)
+                    plan = {SOUND_ID: (name, lambda kind=kind: busybar_sound.sound(kind))}
+                    if SOUND_ID in resolve_assets(config, None, client, plan):
+                        print("ready  " + name)
+                    else:
+                        missing += 1
             if missing:
                 print("BUSY Bar asset install incomplete (enable DEBUG_LOGGING for details)", file=sys.stderr)
                 return 1

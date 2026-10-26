@@ -22,6 +22,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import busybar_anim as anim  # noqa: E402
 import busybar_font as font  # noqa: E402
 import busybar_mascot as mascot  # noqa: E402
+import busybar_sound as sounds  # noqa: E402
 import busybar_status as status  # noqa: E402
 
 
@@ -42,8 +43,10 @@ class FakeResponse:
 class FakeDevice:
     """Models the BUSY Bar endpoints the plugin uses: draws merge by element id, assets are per app."""
 
-    def __init__(self, fail_uploads=False, busy_uploads=0):
+    def __init__(self, fail_uploads=False, busy_uploads=0, fail_play=False):
         self.calls = []
+        self.played = []
+        self.fail_play = fail_play
         self.assets = {}
         self.screen = {}
         self.fail_uploads = fail_uploads
@@ -70,6 +73,11 @@ class FakeDevice:
                 self.busy_uploads -= 1
                 raise urllib.error.HTTPError(request.full_url, 508, "Loop Detected", {}, io.BytesIO(b"{}"))
             self.assets[params["file"]] = body
+        elif (method, path) == ("POST", "/audio/play"):
+            name = json.loads(body)["path"]
+            if self.fail_play or name not in self.assets:
+                raise urllib.error.HTTPError(request.full_url, 400, "Bad Request", {}, io.BytesIO(b"{}"))
+            self.played.append(name)
         elif (method, path) == ("POST", "/display/draw"):
             for element in json.loads(body)["elements"]:
                 self.screen[element["id"]] = element
@@ -558,6 +566,77 @@ class StatusTests(unittest.TestCase):
         self.assertEqual(device.screen[status.MODE_ID]["text"], "PLAN")
         self.assertEqual(device.screen[status.TITLE_ID]["text"], "FINISHED")
 
+    def feed(self, device, events, config=None):
+        """Apply hook events that happened `age` seconds ago and dispatch after each."""
+        config = config or self.config
+        store = status.Store(config)
+        with mock.patch.object(status.urllib.request, "urlopen", side_effect=device):
+            for event, extra, age in events:
+                payload = {"hook_event_name": event, "session_id": "one"}
+                payload.update(extra)
+                status.apply_event(store, payload, now=time.time() - age)
+                status.dispatch(config, delay=0)
+
+    def test_a_sound_plays_when_waiting_starts_but_not_on_redraws_or_repeats(self):
+        device = FakeDevice()
+        self.feed(device, [("UserPromptSubmit", {}, 9), ("PermissionRequest", {"tool_name": "Bash"}, 8)])
+        waiting = sounds.sound_asset_name("waiting")
+        self.assertEqual(device.played, [waiting])
+        self.assertEqual(len(device.assets[waiting]), len(sounds.sound("waiting")), "the synthesized PCM was uploaded")
+        with mock.patch.object(status, "SOUND_COOLDOWN", 0):
+            self.feed(device, [("Notification", {"notification_type": "permission_prompt"}, 7),
+                               ("PermissionRequest", {"tool_name": "Edit"}, 6)])
+            self.assertEqual(device.played, [waiting], "same state, only the subtitle changed")
+            self.feed(device, [("PostToolUse", {}, 5), ("PermissionRequest", {"tool_name": "Bash"}, 4)])
+            self.assertEqual(device.played, [waiting, waiting], "a new wait plays again")
+
+    def test_sounds_have_a_cooldown(self):
+        device = FakeDevice()
+        self.feed(device, [("UserPromptSubmit", {}, 9), ("PermissionRequest", {}, 8), ("PostToolUse", {}, 7),
+                           ("PermissionRequest", {}, 6)])
+        self.assertEqual(len(device.played), 1, "the second wait came within the cooldown")
+
+    def fresh_state(self):
+        (Path(self.tempdir.name) / "state.json").unlink(missing_ok=True)
+
+    def test_finished_only_sounds_after_a_long_turn(self):
+        short, long = FakeDevice(), FakeDevice()
+        self.feed(short, [("UserPromptSubmit", {}, 3), ("Stop", {}, 0)])
+        self.assertEqual(short.played, [])
+        self.fresh_state()
+        self.feed(long, [("UserPromptSubmit", {}, 25), ("Stop", {}, 0)])
+        self.assertEqual(long.played, [sounds.sound_asset_name("finished")])
+        self.fresh_state()
+        threshold = dataclasses.replace(self.config, sound_min_seconds=1)
+        quick = FakeDevice()
+        self.feed(quick, [("UserPromptSubmit", {}, 3), ("Stop", {}, 0)], config=threshold)
+        self.assertEqual(len(quick.played), 1, "the threshold is configurable")
+
+    def test_sounds_can_be_turned_off_and_never_break_the_display(self):
+        off = FakeDevice()
+        self.feed(off, [("UserPromptSubmit", {}, 9), ("PermissionRequest", {}, 8)], config=dataclasses.replace(self.config, sounds=False))
+        self.assertEqual(off.played, [])
+        self.assertFalse([name for name in off.assets if name.endswith(".snd")])
+        self.assertNotIn(("POST", "/audio/play"), off.calls)
+        for broken in (FakeDevice(fail_play=True), FakeDevice(fail_uploads=True)):
+            self.fresh_state()
+            self.feed(broken, [("UserPromptSubmit", {}, 9), ("PermissionRequest", {"tool_name": "Bash"}, 8)])
+            self.assertEqual(broken.played, [])
+            self.assertEqual(broken.screen[status.SUBTITLE_ID]["text"], "Allow Bash?", "the screen is drawn regardless")
+
+    def test_sound_due_rules(self):
+        base = dict(config=self.config, turn_seconds=None, last_sound_at=0.0, now=1000.0)
+        due = lambda **kw: status.sound_due(**dict(base, **kw))
+        self.assertTrue(due(status="WAITING_FOR_INPUT", previous_status="WORKING"))
+        self.assertTrue(due(status="WAITING_FOR_INPUT", previous_status=None))
+        self.assertFalse(due(status="WAITING_FOR_INPUT", previous_status="WAITING_FOR_INPUT"))
+        self.assertFalse(due(status="WAITING_FOR_INPUT", previous_status="WORKING", last_sound_at=999.0))
+        self.assertTrue(due(status="FINISHED", previous_status="WORKING", turn_seconds=20.0))
+        self.assertFalse(due(status="FINISHED", previous_status="WORKING", turn_seconds=19.9))
+        self.assertFalse(due(status="FINISHED", previous_status="WORKING", turn_seconds=None))
+        for quiet in ("WORKING", "ERROR", "LIMIT", "READY", "IDLE"):
+            self.assertFalse(due(status=quiet, previous_status="FINISHED", turn_seconds=99.0), quiet)
+
     def test_waiting_says_what_it_waits_for(self):
         for payload, expected in [
             ({"hook_event_name": "PermissionRequest", "tool_name": "Bash"}, "Allow Bash?"),
@@ -863,6 +942,44 @@ class FontTests(unittest.TestCase):
         for text, width in [("PLAN", 16), ("AUTO", 17), ("EDIT", 15), ("LOCK", 17), ("YOLO", 19), ("Compacting", 38),
                             ("Searching", 31), ("Editing", 22), ("PLEASE WAIT", 44)]:
             self.assertEqual(font.text_width(text, "tiny"), width, text)
+
+
+class SoundTests(unittest.TestCase):
+    def samples(self, pcm):
+        return struct.unpack("<%dh" % (len(pcm) // 2), pcm)
+
+    def pitch(self, values, start, stop):
+        """Frequency from zero crossings between two times (seconds)."""
+        window = values[int(start * sounds.SAMPLE_RATE):int(stop * sounds.SAMPLE_RATE)]
+        crossings = sum(1 for a, b in zip(window, window[1:]) if (a < 0) != (b < 0))
+        return crossings / 2 / (stop - start)
+
+    def test_pcm_is_quiet_clean_and_the_right_length(self):
+        for kind, notes in sounds.KINDS.items():
+            pcm = sounds.sound(kind)
+            values = self.samples(pcm)
+            seconds = max(start + length for _, start, length, _ in notes)
+            self.assertAlmostEqual(len(values) / sounds.SAMPLE_RATE, seconds, delta=0.01)
+            self.assertLessEqual(max(map(abs, values)), sounds.GAIN * 32767 + 1, "quiet by construction")
+            self.assertGreater(max(map(abs, values)), sounds.GAIN * 32767 * 0.9, "but normalized to GAIN")
+            self.assertLessEqual(abs(values[0]) + abs(values[-1]), 40, "starts and ends at silence, so no clicks")
+            self.assertEqual(pcm, sounds.sound(kind), "deterministic")
+            self.assertLess(len(pcm), 100000, "small enough to upload quickly")
+
+    def test_waiting_falls_and_finished_rises(self):
+        waiting = self.samples(sounds.sound("waiting"))
+        self.assertAlmostEqual(self.pitch(waiting, 0.01, 0.15), sounds.A5, delta=60)
+        self.assertAlmostEqual(self.pitch(waiting, 0.45, 0.55), sounds.E5, delta=40)
+        finished = self.samples(sounds.sound("finished"))
+        self.assertAlmostEqual(self.pitch(finished, 0.0, 0.06), sounds.C5, delta=60)
+        self.assertAlmostEqual(self.pitch(finished, 0.55, 0.75), sounds.C6, delta=60)
+
+    def test_asset_names(self):
+        names = {kind: sounds.sound_asset_name(kind) for kind in sounds.KINDS}
+        self.assertEqual(len(set(names.values())), len(names))
+        self.assertTrue(all(name.endswith(".snd") for name in names.values()))
+        self.assertEqual(names, {kind: sounds.sound_asset_name(kind) for kind in sounds.KINDS}, "stable")
+        self.assertLessEqual(len("/ext/user_assets/claude-code-status/" + max(names.values(), key=len)), 64)
 
 
 class AnimationTests(unittest.TestCase):
