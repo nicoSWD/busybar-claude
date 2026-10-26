@@ -5,7 +5,7 @@ BUSY Bar front display. It uses Claude Code lifecycle hooks, shared per-plugin
 state, and BUSY Bar's HTTP API. It does not add tools or prompt instructions,
 so status changes consume no model tokens.
 
-![The bar while Claude is working: the mascot types behind a laptop, "WORKING" in blue, the current tool as a white subtitle, and a comet sweeping along the bottom](docs/working.gif)
+![The bar while Claude is working: the mascot types behind a laptop, "WORKING" in blue, the current tool as a white subtitle, a comet sweeping along the bottom, and the permission mode ("AUTO") in the bottom-right corner](docs/working.gif)
 
 *The **WORKING** state on a real BUSY Bar (captured from the device, 2 s loop):
 the mascot types behind a laptop, the subtitle names the tool Claude is using
@@ -266,7 +266,7 @@ It needs [Pillow](https://pypi.org/project/pillow/) (the plugin itself needs onl
 the standard library):
 
 ```sh
-python3 tools/capture_screenshot.py --url 10.0.4.20 --state WORKING --activity Editing
+python3 tools/capture_screenshot.py --url 10.0.4.20 --state WORKING --activity Editing --mode auto
 ```
 
 `--state` takes any of the seven states. `tools/make_icon.py` renders the plugin

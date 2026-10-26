@@ -8,7 +8,7 @@ renders the frames as glowing LED pixels inside a small device bezel.
 Needs Pillow (the plugin itself is standard-library only):
 
     python3 tools/capture_screenshot.py --url 10.0.4.20 --state WORKING --activity Editing \\
-        --out docs/working.gif
+        --mode auto --out docs/working.gif
 """
 
 from __future__ import annotations
@@ -75,6 +75,7 @@ def main() -> int:
     parser.add_argument("--url", help="device address or API base URL (default: plugin configuration)")
     parser.add_argument("--state", default="WORKING", choices=status.STATUSES)
     parser.add_argument("--activity", default="", help="subtitle to show (WORKING)")
+    parser.add_argument("--mode", default="", help="permission mode for the badge, e.g. plan, acceptEdits, auto")
     parser.add_argument("--seconds", type=float, default=2.0, help="how much animation to record")
     parser.add_argument("--fps", type=float, default=25.0)
     parser.add_argument("--out", default=str(ROOT / "docs" / "working.gif"))
@@ -88,7 +89,7 @@ def main() -> int:
     client = status.BusyBarClient(config)
     plan = status.asset_plan(config, args.state)
     assets = status.resolve_assets(config, None, client, plan)
-    client.send(args.state, activity=args.activity, assets=assets)
+    client.send(args.state, activity=args.activity, assets=assets, mode=args.mode)
     status.forget_drawn(config)  # the next real hook redraws from scratch
     time.sleep(0.15)  # let the animations start
 
