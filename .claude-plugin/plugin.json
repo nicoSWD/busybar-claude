@@ -1,0 +1,161 @@
+{
+  "name": "busy-claude",
+  "version": "1.0.0",
+  "description": "Mirror Claude Code's lifecycle state (working, waiting, limit, finished, error, ready, idle) on a BUSY Bar front display using lifecycle hooks. No model tokens consumed.",
+  "icon": "./.claude-plugin/icon.png",
+  "author": {
+    "name": "Claude BUSY Bar contributors"
+  },
+  "userConfig": {
+    "DEVICE_URL": {
+      "type": "string",
+      "title": "Device URL",
+      "description": "BUSY Bar API base URL. USB default, or a LAN/cloud address.",
+      "default": "http://10.0.4.20/api"
+    },
+    "AUTH_MODE": {
+      "type": "string",
+      "title": "Authentication mode",
+      "description": "Connection type. USB needs no token; Wi-Fi uses the API password; cloud uses a BUSY account API token.",
+      "default": "usb",
+      "options": [
+        "usb",
+        "wifi",
+        "cloud"
+      ]
+    },
+    "AUTH_TOKEN": {
+      "type": "string",
+      "title": "Authentication token",
+      "description": "Wi-Fi API password or BUSY cloud API token. Empty for USB.",
+      "default": "",
+      "sensitive": true
+    },
+    "STATUS_UPDATES_ENABLED": {
+      "type": "boolean",
+      "title": "Status updates",
+      "description": "Enable or disable sending lifecycle state to the BUSY Bar.",
+      "default": true
+    },
+    "REQUEST_TIMEOUT": {
+      "type": "string",
+      "title": "Request timeout",
+      "description": "HTTP timeout in seconds for each BUSY Bar request (0.1-30).",
+      "default": "1.5"
+    },
+    "STALE_SESSION_SECONDS": {
+      "type": "string",
+      "title": "Stale session timeout",
+      "description": "Seconds before a session that emitted no hook event is removed (1-86400).",
+      "default": "3600"
+    },
+    "DEBUG_LOGGING": {
+      "type": "boolean",
+      "title": "Debug logging",
+      "description": "Write debug logs to debug.log under the plugin data directory.",
+      "default": false
+    },
+    "WORKING_LABEL": {
+      "type": "string",
+      "title": "WORKING label",
+      "description": "Text shown on the bar while Claude is working.",
+      "default": "WORKING"
+    },
+    "WAITING_LABEL": {
+      "type": "string",
+      "title": "WAITING label",
+      "description": "Text shown while Claude waits for input.",
+      "default": "WAITING"
+    },
+    "LIMIT_LABEL": {
+      "type": "string",
+      "title": "LIMIT label",
+      "description": "Text shown while Claude is held up by a usage or rate limit.",
+      "default": "LIMIT"
+    },
+    "FINISHED_LABEL": {
+      "type": "string",
+      "title": "FINISHED label",
+      "description": "Text shown when a response finishes.",
+      "default": "FINISHED"
+    },
+    "ERROR_LABEL": {
+      "type": "string",
+      "title": "ERROR label",
+      "description": "Text shown on a failed stop.",
+      "default": "ERROR"
+    },
+    "READY_LABEL": {
+      "type": "string",
+      "title": "READY label",
+      "description": "Text shown when a session is open and waiting for its first prompt.",
+      "default": "READY"
+    },
+    "IDLE_LABEL": {
+      "type": "string",
+      "title": "IDLE label",
+      "description": "Text shown when no session is active.",
+      "default": "IDLE"
+    },
+    "WORKING_COLOR": {
+      "type": "string",
+      "title": "WORKING color",
+      "description": "#RRGGBBAA text color.",
+      "default": "#0080FFFF"
+    },
+    "WAITING_COLOR": {
+      "type": "string",
+      "title": "WAITING color",
+      "description": "#RRGGBBAA text color.",
+      "default": "#FFB000FF"
+    },
+    "LIMIT_COLOR": {
+      "type": "string",
+      "title": "LIMIT color",
+      "description": "#RRGGBBAA text color.",
+      "default": "#A060FFFF"
+    },
+    "FINISHED_COLOR": {
+      "type": "string",
+      "title": "FINISHED color",
+      "description": "#RRGGBBAA text color.",
+      "default": "#00FF66FF"
+    },
+    "ERROR_COLOR": {
+      "type": "string",
+      "title": "ERROR color",
+      "description": "#RRGGBBAA text color.",
+      "default": "#FF2020FF"
+    },
+    "READY_COLOR": {
+      "type": "string",
+      "title": "READY color",
+      "description": "#RRGGBBAA text color.",
+      "default": "#00C8D0FF"
+    },
+    "IDLE_COLOR": {
+      "type": "string",
+      "title": "IDLE color",
+      "description": "#RRGGBBAA text color.",
+      "default": "#606060FF"
+    },
+    "SUBTITLE_COLOR": {
+      "type": "string",
+      "title": "Subtitle color",
+      "description": "#RRGGBBAA color of the activity subtitle shown while working.",
+      "default": "#FFFFFFFF"
+    },
+    "MASCOT": {
+      "type": "boolean",
+      "title": "Claude mascot",
+      "description": "Show an animated Claude mascot on the left of the display that reacts to the current state. Uploads five small animations to the bar.",
+      "default": true
+    },
+    "WORKING_ANIMATION": {
+      "type": "boolean",
+      "title": "Working animation",
+      "description": "Play a progress animation along the bottom of the display while Claude is working. Uploads one small asset to the bar.",
+      "default": true
+    }
+  }
+}
