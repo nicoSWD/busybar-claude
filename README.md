@@ -5,7 +5,12 @@ BUSY Bar front display. It uses Claude Code lifecycle hooks, shared per-plugin
 state, and BUSY Bar's HTTP API. It does not add tools or prompt instructions,
 so status changes consume no model tokens.
 
-**[Install](#install)** takes two commands.
+![The bar while Claude is working: the mascot types behind a laptop, "WORKING" in blue, the current tool as a white subtitle, a comet sweeping along the bottom, and the permission mode ("AUTO") in the bottom-right corner](docs/working.gif)
+
+*The **WORKING** state on a real BUSY Bar (captured from the device, 2 s loop):
+the mascot types behind a laptop, the subtitle names the tool Claude is using
+right now, and a comet sweeps the bottom edge. The other states are described
+under [Display layout](#display-layout).*
 
 **Contents**
 
@@ -38,23 +43,11 @@ so status changes consume no model tokens.
 - [Troubleshooting](#troubleshooting)
 - [References](#references)
 
-![The bar while Claude is working: the mascot types behind a laptop, "WORKING" in blue, the current tool as a white subtitle, a comet sweeping along the bottom, and the permission mode ("AUTO") in the bottom-right corner](docs/working.gif)
-
-*The **WORKING** state on a real BUSY Bar (captured from the device, 2 s loop):
-the mascot types behind a laptop, the subtitle names the tool Claude is using
-right now, and a comet sweeps the bottom edge. The other states are described
-under [Display layout](#display-layout).*
-
 ![The bar while Claude waits for permission: WAITING with animated dots, "Allow Bash?" underneath, the mascot tapping its foot and an amber ripple along the bottom](docs/waiting.gif)
 
 ***WAITING**: Claude needs a permission or an answer. The subtitle says what
 it is asking for, and the bar makes a short sound
 (see [Waiting dots](#waiting-dots) and [Sounds](#sounds)).*
-
-![The bar after Claude finishes: FINISHED with a flashing double exclamation mark, "Done in 42s" underneath, a rainbow rail along the bottom and fireworks to the right of the text](docs/finished.gif)
-
-*Turn done: **FINISHED** with the turn time, a rainbow rail and fireworks
-(see [Celebration](#celebration)).*
 
 ## Install
 
