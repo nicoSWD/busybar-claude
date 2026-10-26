@@ -89,6 +89,11 @@ no hook. It never uses timers to guess.
   Claude Code sends an `idle_prompt` notification and the bar changes from
   `FINISHED` to `WAITING`. It does not do this while waiting out a usage limit
   or while a background agent is running.
+- **Permission-mode changes.** No hook fires when you switch modes (Shift+Tab, or
+  plan mode starting and ending). The badge updates on the next event that carries the
+  mode (a prompt or any tool call), so a change made while the session is idle shows up
+  late. `SessionStart`, notifications, `StopFailure` and compaction events do not carry it;
+  the last known mode is kept for those, and a new session shows no badge until its first prompt.
 - **Several sessions.** One bar shows the highest-priority state across all
   open sessions (see the precedence above), so a busy session hides a finished
   one.
@@ -104,6 +109,7 @@ x 0-15    mascot      16x16 looping animation, one per state
             rows 1-5    WORKING          small font, state color (rows 6-10, centered, when alone)
             rows 8-11   Editing          tiny font, white (WORKING only)
             rows 14-15  comet            sweeping the column (WORKING only)
+x 52-71   rows 0-5   permission-mode badge (not shown in the default mode)
 ```
 
 ### Mascot
@@ -141,6 +147,27 @@ Text is centered on the whole display. A label too wide to clear the mascot
 (over about 8 characters in the title font) is centered in the 56px column
 beside it instead, and one too wide for that column (about 11 characters) is
 anchored at the column's left edge and scrolls rather than covering the mascot.
+
+### Permission-mode badge
+
+Claude Code reports the session's permission mode in the hook input (`permission_mode`),
+so the bar can show it as a small colored pill in the top-right corner, the word cut
+out of the pill:
+
+| Mode | Badge |
+| --- | --- |
+| Plan mode | `PLAN` (teal) |
+| Accept edits | `EDIT` (blue) |
+| Auto mode | `AUTO` (green) |
+| Don't ask | `LOCK` (gray) |
+| Bypass permissions | `RISK` (red) |
+| Default ("Manual") | no badge |
+
+The badge follows the session whose state the bar is showing and stays across state changes.
+Changing it redraws only the pill, so the mascot and comet keep animating. The words are
+four letters so the pill (at most 19 px wide) clears the title. Set `MODE_BADGE` to `false`
+to turn it off. The tiny-font glyph widths needed to size the pill are in
+`scripts/busybar_font.py`.
 
 ### Waiting dots
 
@@ -314,7 +341,7 @@ not take effect, run `/reload-plugins`.
 The same dialog has everything else you can change: enable or disable updates,
 the request and stale-session timeouts, the label and `#RRGGBBAA` color of each
 of the seven states, the subtitle color (default white), the mascot, the
-working comet, and debug logging. Non-sensitive options also show up as rows in
+working comet, the waiting dots, the permission-mode badge, and debug logging. Non-sensitive options also show up as rows in
 `/config`. Debug logs go to `debug.log` under `CLAUDE_PLUGIN_DATA`; hooks never
 print connection failures into the conversation.
 

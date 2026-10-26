@@ -22,7 +22,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Sequence, Tuple
 
 import busybar_anim
 import busybar_font
@@ -111,16 +111,26 @@ SUBTITLE_Y = 7
 SUBTITLE_COLOR = "#FFFFFFFF"
 ANIMATION_ID = "claude-anim"
 ANIMATION_Y = 14
-# Estimated advance per character (px), to decide where a label fits. Measured on the device:
-# "WORKING" is 32px in `small`, "Searching" 31px in `tiny`.
-GLYPH_ADVANCE = {"small": 5, "tiny": 4}
+MODE_BG_ID = "claude-mode-bg"
+MODE_ID = "claude-mode"
+BADGE_HEIGHT = 6  # rows 0-5, top-right; `tiny` caps are rows 1-4 inside it
+BADGE_PAD = 1  # pixels either side of the word
+# permission_mode -> (word, pill color). Words are short so the pill clears the title: the widest
+# title with a subtitle ("WORKING") ends at x=51, so a pill starts at x>=53 to leave a gap.
+MODE_BADGES = {
+    "plan": ("PLAN", "#20C9A6FF"),
+    "acceptEdits": ("EDIT", "#4A8CFFFF"),
+    "auto": ("AUTO", "#3DDC84FF"),
+    "dontAsk": ("LOCK", "#C0C4D0FF"),
+    "bypassPermissions": ("RISK", "#FF3030FF"),
+}
 DOTS_ID = "claude-dots"
 DOTS_GAP = 1  # pixels between the last letter and the first dot, as between letters
 MASCOT_ID = "claude-mascot"
 MASCOT_WIDTH = busybar_mascot.SIZE
 DISPLAY_WIDTH = 72
-MANAGED_IDS = (TITLE_ID, SUBTITLE_ID, MASCOT_ID, ANIMATION_ID, DOTS_ID)
-LAYOUT_VERSION = 6  # bump to force a redraw after changing the layout above
+MANAGED_IDS = (TITLE_ID, SUBTITLE_ID, MASCOT_ID, ANIMATION_ID, DOTS_ID, MODE_BG_ID, MODE_ID)
+LAYOUT_VERSION = 7  # bump to force a redraw after changing the layout above
 ASSET_RETRY_SECONDS = 60.0
 ASSET_UPLOAD_TIMEOUT = 15.0
 
@@ -181,6 +191,7 @@ class Config:
     animation: bool = True
     mascot: bool = True
     waiting_dots: bool = True
+    mode_badge: bool = True
     subtitle_color: str = SUBTITLE_COLOR
 
     @property
@@ -224,6 +235,7 @@ class Config:
             animation=_as_bool(_env("WORKING_ANIMATION", "true"), True),
             mascot=_as_bool(_env("MASCOT", "true"), True),
             waiting_dots=_as_bool(_env("WAITING_DOTS", "true"), True),
+            mode_badge=_as_bool(_env("MODE_BADGE", "true"), True),
             subtitle_color=valid_color(_env("SUBTITLE_COLOR", SUBTITLE_COLOR), SUBTITLE_COLOR),
         )
 
@@ -353,6 +365,15 @@ def aggregate_activity(sessions: Mapping[str, Mapping[str, Any]], state: str) ->
     return str(latest.get("activity", ""))
 
 
+def aggregate_mode(sessions: Mapping[str, Mapping[str, Any]], state: str) -> str:
+    """Permission mode of the session that decides what the bar shows ("" for default or unknown)."""
+    candidates = [item for item in sessions.values() if item.get("state") == state]
+    if not candidates:
+        return ""
+    latest = max(candidates, key=lambda item: float(item.get("updated_at", 0)))
+    return str(latest.get("mode", ""))
+
+
 def apply_event(store: Store, payload: Mapping[str, Any], now: Optional[float] = None) -> Tuple[str, bool]:
     now = time.time() if now is None else now
     event = str(payload.get("hook_event_name", ""))
@@ -362,6 +383,7 @@ def apply_event(store: Store, payload: Mapping[str, Any], now: Optional[float] =
         store.prune_unlocked(data, now)
         previous = aggregate_state(data["sessions"])
         previous_activity = aggregate_activity(data["sessions"], previous)
+        previous_mode = aggregate_mode(data["sessions"], previous)
         if event == "SessionEnd":
             data["sessions"].pop(session_id, None)
         else:
@@ -373,9 +395,16 @@ def apply_event(store: Store, payload: Mapping[str, Any], now: Optional[float] =
             else:
                 state = event_state(payload)
             if state is None:
-                needs_dispatch = data.get("last_sent") != render_fingerprint(store.config, previous, previous_activity)
+                needs_dispatch = data.get("last_sent") != render_fingerprint(
+                    store.config, previous, previous_activity, previous_mode
+                )
                 return previous, needs_dispatch
             record = {"state": state, "updated_at": now, "event": event}
+            mode = payload.get("permission_mode")
+            if isinstance(mode, str):  # not every event carries it; otherwise keep what we knew
+                record["mode"] = "" if mode == "default" else mode
+            elif old.get("mode"):
+                record["mode"] = old["mode"]
             if event == "PreCompact":
                 resume = old.get("resume_state") if old.get("event") == "PreCompact" else old.get("state")
                 if resume:
@@ -390,10 +419,12 @@ def apply_event(store: Store, payload: Mapping[str, Any], now: Optional[float] =
                 data["drawn"] = None
         current = aggregate_state(data["sessions"])
         current_activity = aggregate_activity(data["sessions"], current)
+        current_mode = aggregate_mode(data["sessions"], current)
         needs_dispatch = (
             current != previous
             or current_activity != previous_activity
-            or data.get("last_sent") != render_fingerprint(store.config, current, current_activity)
+            or current_mode != previous_mode
+            or data.get("last_sent") != render_fingerprint(store.config, current, current_activity, current_mode)
         )
         store.save_unlocked(data)
         return current, needs_dispatch
@@ -436,6 +467,7 @@ class BusyBarClient:
         color: Optional[str] = None,
         activity: str = "",
         assets: Optional[Mapping[str, str]] = None,
+        mode: str = "",
     ) -> Dict[str, Dict[str, Any]]:
         """The complete set of elements to show for a state, keyed by element id.
 
@@ -463,7 +495,7 @@ class BusyBarClient:
                 "scroll_repeat_delay": 2500,
             }
             if config.mascot:
-                estimate = len(content) * GLYPH_ADVANCE[font]
+                estimate = busybar_font.text_width(content, font)
                 if estimate > DISPLAY_WIDTH - 2 * MASCOT_WIDTH:
                     # Would reach the mascot if centered on the display: center in the column instead.
                     element["x"] = config.column_x + config.column_width // 2
@@ -506,6 +538,35 @@ class BusyBarClient:
             wanted[MASCOT_ID] = animation_element(MASCOT_ID, 0, 0)
         if ANIMATION_ID in assets:
             wanted[ANIMATION_ID] = animation_element(ANIMATION_ID, config.column_x, ANIMATION_Y)
+        if config.mode_badge and mode in MODE_BADGES:
+            word, pill_color = MODE_BADGES[mode]
+            width = busybar_font.text_width(word, SUBTITLE_FONT) + 2 * BADGE_PAD
+            left = DISPLAY_WIDTH - width
+            wanted[MODE_BG_ID] = {
+                "id": MODE_BG_ID,
+                "type": "rectangle",
+                "display": "front",
+                "x": left,
+                "y": 0,
+                "width": width,
+                "height": BADGE_HEIGHT,
+                "radius": 0,
+                "fill": "solid",
+                "fill_colors": [pill_color],
+                "border_width": 0,
+                "border_color": "#00000000",
+            }
+            wanted[MODE_ID] = {  # black on the pill: LED off, so the word reads as cut out
+                "id": MODE_ID,
+                "type": "text",
+                "display": "front",
+                "text": word,
+                "font": SUBTITLE_FONT,
+                "color": "#000000FF",
+                "align": "top_left",
+                "x": left + BADGE_PAD,
+                "y": 0,
+            }
         return wanted
 
     def payload(
@@ -515,8 +576,9 @@ class BusyBarClient:
         color: Optional[str] = None,
         activity: str = "",
         assets: Optional[Mapping[str, str]] = None,
+        mode: str = "",
     ) -> Dict[str, Any]:
-        elements = self.elements(status, label, color, activity, assets)
+        elements = self.elements(status, label, color, activity, assets, mode)
         return {"application_name": self.config.application_name, "elements": list(elements.values())}
 
     def draw(self, elements: Sequence[Mapping[str, Any]]) -> None:
@@ -552,6 +614,14 @@ class BusyBarClient:
                 if error.code != 400:
                     raise
 
+    def erase_all(self) -> None:
+        """Clear everything this app has drawn. The device answers 400 when there is nothing to clear."""
+        try:
+            self.request("DELETE", "/display/draw", {"application_name": self.config.application_name})
+        except urllib.error.HTTPError as error:
+            if error.code != 400:
+                raise
+
     def show(
         self,
         status: str,
@@ -560,18 +630,20 @@ class BusyBarClient:
         activity: str = "",
         assets: Optional[Mapping[str, str]] = None,
         previous: Optional[Mapping[str, Mapping[str, Any]]] = None,
+        mode: str = "",
     ) -> Dict[str, Dict[str, Any]]:
         """Bring the display to `status`, touching only what differs from `previous`.
 
         Draws merge by element id on the device, so an unchanged animation is left
         alone and keeps playing while the subtitle changes. With no `previous`
-        (unknown device state) every wanted element is sent and leftovers of ours
-        are erased. Returns the elements now on screen.
+        (unknown device state) our display is cleared and everything is drawn
+        afresh. Returns the elements now on screen.
         """
-        wanted = self.elements(status, label, color, activity, assets)
+        wanted = self.elements(status, label, color, activity, assets, mode)
         if previous is None:
+            self.erase_all()
             changed = list(wanted.values())
-            stale = [element_id for element_id in MANAGED_IDS if element_id not in wanted]
+            stale: List[str] = []
         else:
             changed = [element for element_id, element in wanted.items() if previous.get(element_id) != element]
             stale = [element_id for element_id in previous if element_id not in wanted]
@@ -588,8 +660,9 @@ class BusyBarClient:
         color: Optional[str] = None,
         activity: str = "",
         assets: Optional[Mapping[str, str]] = None,
+        mode: str = "",
     ) -> None:
-        self.show(status, label, color, activity, assets)
+        self.show(status, label, color, activity, assets, mode=mode)
 
     def asset_dir(self) -> str:
         return "/ext/user_assets/" + self.config.application_name
@@ -640,7 +713,7 @@ class BusyBarClient:
             return {"response": raw.decode("utf-8", errors="replace")}
 
 
-def render_fingerprint(config: Config, status: str, activity: str = "") -> str:
+def render_fingerprint(config: Config, status: str, activity: str = "", mode: str = "") -> str:
     material = json.dumps(
         [
             LAYOUT_VERSION,
@@ -654,7 +727,9 @@ def render_fingerprint(config: Config, status: str, activity: str = "") -> str:
             config.animation,
             config.mascot,
             config.waiting_dots,
+            config.mode_badge,
             activity,
+            mode,
         ],
         separators=(",", ":"),
     )
@@ -751,7 +826,8 @@ def dispatch(config: Config, force: bool = False, delay: float = 0.04) -> bool:
             store.prune_unlocked(data, time.time())
             status = aggregate_state(data["sessions"])
             activity = aggregate_activity(data["sessions"], status)
-            fingerprint = render_fingerprint(config, status, activity)
+            mode = aggregate_mode(data["sessions"], status)
+            fingerprint = render_fingerprint(config, status, activity, mode)
             if not force and data.get("last_sent") == fingerprint:
                 store.save_unlocked(data)
                 return True
@@ -760,7 +836,7 @@ def dispatch(config: Config, force: bool = False, delay: float = 0.04) -> bool:
         client = BusyBarClient(config)
         try:
             assets = resolve_assets(config, store, client, asset_plan(config, status), previous)
-            drawn = client.show(status, activity=activity, assets=assets, previous=previous)
+            drawn = client.show(status, activity=activity, assets=assets, previous=previous, mode=mode)
         except Exception as error:  # A device failure must never reach Claude Code.
             log(config, "send %s failed: %s: %s" % (status, type(error).__name__, error))
             with contextlib.suppress(Exception):
@@ -774,7 +850,8 @@ def dispatch(config: Config, force: bool = False, delay: float = 0.04) -> bool:
             latest["drawn"] = drawn
             latest_status = aggregate_state(latest["sessions"])
             latest_activity = aggregate_activity(latest["sessions"], latest_status)
-            if render_fingerprint(config, latest_status, latest_activity) == fingerprint:
+            latest_mode = aggregate_mode(latest["sessions"], latest_status)
+            if render_fingerprint(config, latest_status, latest_activity, latest_mode) == fingerprint:
                 latest["last_sent"] = fingerprint
             store.save_unlocked(latest)
         log(config, "sent %s %s" % (status, activity))
@@ -905,6 +982,7 @@ def build_parser() -> argparse.ArgumentParser:
     send.add_argument("--label", help="one-off display label")
     send.add_argument("--color", help="one-off #RRGGBBAA text color")
     send.add_argument("--activity", default="", help="one-off subtitle under the status label")
+    send.add_argument("--mode", default="", choices=[""] + list(MODE_BADGES), help="one-off permission-mode badge")
     subparsers.add_parser("demo", help="send all five statuses in sequence")
     subparsers.add_parser("assets", help="install the mascot and WORKING animations on the device if missing")
     subparsers.add_parser("state", help="print the shared session state")
@@ -944,7 +1022,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             assets = resolve_assets(config, None, client, plan)
             if len(assets) < len(plan):
                 print("warning: could not install every animation; drawing without it (try DEBUG_LOGGING)", file=sys.stderr)
-            client.send(args.status, args.label, args.color, args.activity, assets)
+            client.send(args.status, args.label, args.color, args.activity, assets, args.mode)
             forget_drawn(config)
             print("Sent %s to %s" % (args.status, config.base_url))
             return 0

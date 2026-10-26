@@ -157,6 +157,12 @@
       "description": "Animate dots after the label while Claude waits for input, like WAITING... Uploads one tiny animation to the bar.",
       "default": true
     },
+    "MODE_BADGE": {
+      "type": "boolean",
+      "title": "Permission-mode badge",
+      "description": "Show a small badge in the top-right corner for the current permission mode (PLAN, EDIT, AUTO, LOCK, RISK). Nothing is shown in the default mode.",
+      "default": true
+    },
     "WORKING_ANIMATION": {
       "type": "boolean",
       "title": "Working animation",

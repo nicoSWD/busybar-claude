@@ -73,6 +73,10 @@ class FakeDevice:
         elif (method, path) == ("POST", "/display/draw"):
             for element in json.loads(body)["elements"]:
                 self.screen[element["id"]] = element
+        elif (method, path) == ("DELETE", "/display/draw") and body is None:
+            if not self.screen:  # like the device: nothing to clear is an error
+                raise urllib.error.HTTPError(request.full_url, 400, "Bad Request", {}, io.BytesIO(b"{}"))
+            self.screen.clear()
         elif (method, path) == ("DELETE", "/display/draw"):
             ids = json.loads(body)["element_ids"]
             if any(element_id not in self.screen for element_id in ids):  # like the device: all or nothing
@@ -350,8 +354,8 @@ class StatusTests(unittest.TestCase):
                 ("GET", "/storage/list"),
                 ("POST", "/assets/upload"),
                 ("POST", "/assets/upload"),
+                ("DELETE", "/display/draw"),  # device state unknown at first: clear our display, then draw
                 ("POST", "/display/draw"),
-                ("DELETE", "/display/draw"),  # device state unknown at first: erase a possible leftover
             ],
         )
         self.assertEqual(
@@ -459,6 +463,89 @@ class StatusTests(unittest.TestCase):
         medium = client.elements("IDLE", label="PLEASE WAIT")[status.TITLE_ID]  # 11 chars: too wide for the display center
         self.assertEqual((medium["align"], medium["x"]), ("top_mid", 44))
         self.assertNotIn("width", medium)
+
+    def mode_of(self):
+        with self.store.lock():
+            sessions = self.store.load_unlocked()["sessions"]
+        return status.aggregate_mode(sessions, status.aggregate_state(sessions))
+
+    def test_permission_mode_is_stored_carried_over_and_cleared(self):
+        self.apply("SessionStart", source="startup")
+        self.assertEqual(self.mode_of(), "", "SessionStart does not carry a mode")
+        self.apply("UserPromptSubmit", now=101, permission_mode="plan")
+        self.assertEqual(self.mode_of(), "plan")
+        for event, extra in [("PostToolUse", {"permission_mode": "plan"}), ("PreCompact", {}), ("PostCompact", {}),
+                             ("Notification", {"notification_type": "permission_prompt"}), ("StopFailure", {"error": "rate_limit"})]:
+            self.apply(event, now=102, **extra)
+            self.assertEqual(self.mode_of(), "plan", event + " keeps the mode it did not carry")
+        self.apply("UserPromptSubmit", now=103, permission_mode="auto")
+        self.assertEqual(self.mode_of(), "auto")
+        self.apply("PreToolUse", now=104, tool_name="Bash", permission_mode="default")
+        self.assertEqual(self.mode_of(), "", "default means no badge")
+        self.apply("Stop", now=105)
+        self.assertEqual(self.mode_of(), "")
+
+    def test_mode_follows_the_session_that_decides_the_display(self):
+        self.apply("UserPromptSubmit", session="a", now=100, permission_mode="plan")
+        self.apply("UserPromptSubmit", session="b", now=101, permission_mode="bypassPermissions")
+        self.assertEqual(self.mode_of(), "bypassPermissions", "most recently active working session")
+        self.apply("PermissionRequest", session="a", now=102, permission_mode="plan")
+        self.assertEqual(self.mode_of(), "bypassPermissions", "WORKING outranks WAITING")
+        self.apply("Stop", session="b", now=103, permission_mode="bypassPermissions")
+        self.assertEqual(self.mode_of(), "plan", "WAITING outranks FINISHED, so session a decides")
+
+    def test_mode_change_alone_triggers_a_dispatch_and_changes_the_fingerprint(self):
+        self.apply("UserPromptSubmit", permission_mode="default")
+        with self.store.lock():
+            data = self.store.load_unlocked()
+            data["last_sent"] = status.render_fingerprint(self.config, "WORKING", "Thinking", "")
+            self.store.save_unlocked(data)
+        payload = {"hook_event_name": "PostToolUse", "session_id": "one"}
+        self.assertFalse(status.apply_event(self.store, dict(payload, permission_mode="default"), now=101)[1])
+        self.assertTrue(status.apply_event(self.store, dict(payload, permission_mode="plan"), now=102)[1])
+        self.assertNotEqual(status.render_fingerprint(self.config, "WORKING", "Thinking", "plan"),
+                            status.render_fingerprint(self.config, "WORKING", "Thinking", ""))
+
+    def test_mode_badge_is_a_pill_in_the_top_right_corner(self):
+        client = status.BusyBarClient(self.config)
+        for mode, (word, color) in status.MODE_BADGES.items():
+            wanted = client.elements("WORKING", activity="Reading", mode=mode)
+            pill, text = wanted[status.MODE_BG_ID], wanted[status.MODE_ID]
+            width = font.text_width(word, "tiny") + 2
+            self.assertEqual((pill["type"], pill["x"], pill["y"], pill["width"], pill["height"]), ("rectangle", 72 - width, 0, width, 6), mode)
+            self.assertEqual((pill["fill"], pill["fill_colors"]), ("solid", [color]))
+            self.assertEqual((text["text"], text["x"], text["y"], text["font"], text["color"]), (word, 72 - width + 1, 0, "tiny", "#000000FF"))
+            self.assertEqual(list(wanted)[-2:], [status.MODE_BG_ID, status.MODE_ID], "text is drawn over the pill")
+            title = wanted[status.TITLE_ID]
+            title_end = 36 - font.text_width("WORKING") // 2 + font.text_width("WORKING")  # first free column
+            self.assertGreaterEqual(pill["x"], title_end + 1, "clear of the widest title with a subtitle, with a gap")
+        for none in ("", "default", "mystery"):
+            self.assertEqual(set(client.elements("WORKING", mode=none)), {status.TITLE_ID})
+        off = status.BusyBarClient(dataclasses.replace(self.config, mode_badge=False))
+        self.assertEqual(set(off.elements("WORKING", mode="plan")), {status.TITLE_ID})
+
+    def test_mode_changes_redraw_only_the_badge(self):
+        device = FakeDevice()
+        self.drive(device, [("UserPromptSubmit", {"permission_mode": "default"})])
+        self.assertNotIn(status.MODE_BG_ID, device.screen)
+        mascot_before, comet_before = dict(device.screen[status.MASCOT_ID]), dict(device.screen[status.ANIMATION_ID])
+        device.calls.clear()
+        self.drive(device, [("PostToolUse", {"permission_mode": "plan"})])
+        self.assertEqual(device.calls, [("POST", "/display/draw")], "just the badge, no asset checks")
+        self.assertEqual(device.screen[status.MODE_ID]["text"], "PLAN")
+        self.drive(device, [("PostToolUse", {"permission_mode": "auto"})])
+        self.assertEqual(device.screen[status.MODE_ID]["text"], "AUTO")
+        self.assertEqual((device.screen[status.MASCOT_ID], device.screen[status.ANIMATION_ID]), (mascot_before, comet_before))
+        self.drive(device, [("PostToolUse", {"permission_mode": "default"})])
+        self.assertNotIn(status.MODE_BG_ID, device.screen)
+        self.assertNotIn(status.MODE_ID, device.screen)
+
+    def test_badge_survives_state_changes(self):
+        device = FakeDevice()
+        self.drive(device, [("UserPromptSubmit", {"permission_mode": "plan"}), ("PermissionRequest", {"permission_mode": "plan"}),
+                            ("Stop", {"permission_mode": "plan"})])
+        self.assertEqual(device.screen[status.MODE_ID]["text"], "PLAN")
+        self.assertEqual(device.screen[status.TITLE_ID]["text"], "FINISHED")
 
     def test_waiting_dots_follow_the_label_and_are_centered_with_it(self):
         client = status.BusyBarClient(self.config)
@@ -621,6 +708,9 @@ class FontTests(unittest.TestCase):
                             ("ERROR", 24), ("READY", 23), ("WAITING...", 34), ("PLEASE WAIT", 47)]:
             self.assertEqual(font.text_width(text), width, text)
         self.assertEqual(font.text_width(""), 0)
+        for text, width in [("PLAN", 16), ("AUTO", 17), ("EDIT", 15), ("LOCK", 17), ("YOLO", 19), ("Compacting", 38),
+                            ("Searching", 31), ("Editing", 22), ("PLEASE WAIT", 44)]:
+            self.assertEqual(font.text_width(text, "tiny"), width, text)
 
 
 class AnimationTests(unittest.TestCase):
