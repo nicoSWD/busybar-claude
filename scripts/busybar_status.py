@@ -14,6 +14,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import time
@@ -1327,11 +1328,11 @@ def doctor_checks(config: Config, now: Optional[float] = None, home: Optional[Pa
                 else:
                     checks.append(("ok", "All %d animations and sounds are on the bar" % len(planned), ""))
 
-    settings = home / ".claude" / "settings.json"
+    claude = claude_dir(home)
     wired = False
     with contextlib.suppress(Exception):
-        command = (json.loads(settings.read_text(encoding="utf-8")).get("statusLine") or {}).get("command", "")
-        wired = "busybar" in str(command).lower() or "statusline.py" in str(command)
+        command = (json.loads((claude / "settings.json").read_text(encoding="utf-8")).get("statusLine") or {}).get("command", "")
+        wired = is_wrapped_statusline(str(command))
     if wired:
         checks.append(("ok", "The statusline wrapper is set up (plan usage on the READY screen)", ""))
     else:
@@ -1339,9 +1340,9 @@ def doctor_checks(config: Config, now: Optional[float] = None, home: Optional[Pa
 
     installed = False
     with contextlib.suppress(Exception):
-        plugins = json.loads((home / ".claude" / "plugins" / "installed_plugins.json").read_text(encoding="utf-8")).get("plugins", {})
+        plugins = json.loads((claude / "plugins" / "installed_plugins.json").read_text(encoding="utf-8")).get("plugins", {})
         installed = any(str(key).startswith("busy-claude@") for key in plugins if not str(key).endswith("@skills-dir"))
-    if installed and (home / ".claude" / "skills" / "busy-claude" / ".claude-plugin" / "plugin.json").exists():
+    if installed and (claude / "skills" / "busy-claude" / ".claude-plugin" / "plugin.json").exists():
         checks.append((
             "fail",
             "Installed twice: from a marketplace and as ~/.claude/skills/busy-claude, so every hook runs twice",
@@ -1468,6 +1469,131 @@ def reaper(config: Config) -> int:
             pass
 
 
+def claude_dir(home: Optional[Path] = None) -> Path:
+    """Claude Code's configuration folder (settings.json, plugins, skills)."""
+    if home is not None:
+        return home / ".claude"
+    return Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude").expanduser()
+
+
+LAUNCHER_NAME = "statusline.py"
+
+
+def launcher_path() -> Path:
+    return default_state_dir() / LAUNCHER_NAME
+
+
+def write_launcher(script: Optional[Path] = None) -> Path:
+    """A tiny stable file that runs this script, wherever Claude Code keeps the plugin today.
+
+    The plugin lives in a versioned cache folder that changes with every update, so a statusLine command
+    cannot point at it directly. The hooks refresh this file at every SessionStart.
+    """
+    script = (script or Path(__file__)).resolve()
+    text = (
+        "# Written by busy-claude. Runs the plugin's current script; do not edit.\n"
+        "import runpy\nimport sys\n\n"
+        "SCRIPT = %r\n"
+        "sys.path.insert(0, SCRIPT.rpartition(%r)[0] or '.')\n"
+        "sys.argv[0] = SCRIPT\n"
+        "runpy.run_path(SCRIPT, run_name='__main__')\n"
+    ) % (str(script), os.sep)
+    path = launcher_path()
+    with contextlib.suppress(OSError):
+        if path.read_text(encoding="utf-8") == text:
+            return path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".tmp.%d" % os.getpid())
+    temporary.write_text(text, encoding="utf-8")
+    os.replace(str(temporary), str(path))
+    return path
+
+
+def is_wrapped_statusline(command: str) -> bool:
+    """True for a statusLine command that goes through this plugin (its launcher, or the script directly)."""
+    return str(launcher_path()) in command or "busybar_status.py" in command
+
+
+def _quote(argument: str) -> str:
+    return subprocess.list2cmdline([argument]) if IS_WINDOWS else shlex.quote(argument)
+
+
+def statusline_command(original: Optional[str], launcher: Path, python: str = "python3") -> str:
+    command = "%s %s statusline" % (python, _quote(str(launcher)))
+    return command + (" --next %s" % _quote(original) if original else "")
+
+
+class StatuslineError(Exception):
+    pass
+
+
+def _read_settings(path: Path) -> Dict[str, Any]:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {}
+    try:
+        data = json.loads(text) if text.strip() else {}
+    except ValueError:
+        data = None
+    if not isinstance(data, dict):
+        raise StatuslineError("%s is not a JSON object, so it was left alone" % path)
+    return data
+
+
+def _write_settings(path: Path, data: Mapping[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".tmp.%d" % os.getpid())
+    temporary.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    os.replace(str(temporary), str(path))
+
+
+def install_statusline(settings: Path, python: str = "python3") -> str:
+    """Wrap the user's statusLine command so Claude Code feeds plan usage to the plugin. Backs up settings.json."""
+    data = _read_settings(settings)
+    current = data.get("statusLine")
+    command = current.get("command") if isinstance(current, dict) else None
+    if isinstance(command, str) and is_wrapped_statusline(command):
+        return "The statusline wrapper is already set up."
+    if current is not None and not (isinstance(current, dict) and isinstance(command, str)):
+        raise StatuslineError("The existing statusLine setting has a shape this tool does not know, so it was left alone")
+    if settings.exists():
+        backup = settings.with_name(settings.name + ".busybar-backup")
+        if backup.exists():
+            backup = settings.with_name("%s.busybar-backup-%d" % (settings.name, int(time.time())))
+        backup.write_bytes(settings.read_bytes())
+    launcher = write_launcher()
+    original = default_state_dir() / "statusline-original.json"
+    original.parent.mkdir(parents=True, exist_ok=True)
+    original.write_text(json.dumps({"statusLine": current}), encoding="utf-8")
+    data["statusLine"] = dict(current or {}, type="command", command=statusline_command(command, launcher, python))
+    _write_settings(settings, data)
+    return "Statusline wrapper set up in %s (previous settings kept in a .busybar-backup file)." % settings
+
+
+def uninstall_statusline(settings: Path) -> str:
+    """Put the statusLine setting back the way it was before install_statusline."""
+    data = _read_settings(settings)
+    command = (data.get("statusLine") or {}).get("command") if isinstance(data.get("statusLine"), dict) else None
+    if not (isinstance(command, str) and is_wrapped_statusline(command)):
+        return "The statusline wrapper is not set up, nothing to remove."
+    record = default_state_dir() / "statusline-original.json"
+    try:
+        previous = json.loads(record.read_text(encoding="utf-8")).get("statusLine")
+    except (OSError, ValueError, AttributeError):
+        raise StatuslineError(
+            "The original statusLine setting was not recorded; restore it from the .busybar-backup file next to %s" % settings
+        )
+    if previous is None:
+        data.pop("statusLine", None)
+    else:
+        data["statusLine"] = previous
+    _write_settings(settings, data)
+    with contextlib.suppress(OSError):
+        record.unlink()
+    return "Statusline restored in %s." % settings
+
+
 def state_dir_pointer() -> Path:
     return default_state_dir() / "hook-state-dir"
 
@@ -1522,6 +1648,8 @@ def handle_hook(config: Config, payload: Mapping[str, Any]) -> int:
         status, changed = apply_event(Store(config), payload)
         if payload.get("hook_event_name") == "SessionStart":
             publish_state_dir(config)
+            with contextlib.suppress(Exception):
+                write_launcher()
         log(config, "event=%s aggregate=%s changed=%s" % (payload.get("hook_event_name"), status, changed))
         if config.enabled and changed:
             detached(config, "_dispatch")
@@ -1562,7 +1690,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--auth", choices=("usb", "wifi", "cloud"), help="authentication mode")
     parser.add_argument("--token", help="Wi-Fi password or cloud API token")
     parser.add_argument("--timeout", type=float, help="HTTP timeout in seconds")
-    subparsers = parser.add_subparsers(dest="command", required=True, metavar="{check,send,demo,assets,state,doctor,statusline}")
+    subparsers = parser.add_subparsers(dest="command", required=True, metavar="{check,send,demo,assets,state,doctor,statusline,statusline-install,statusline-uninstall}")
     subparsers.add_parser("hook")
     subparsers.add_parser("check", help="verify the connection and print the API version response")
     send = subparsers.add_parser("send", help="send one status immediately")
@@ -1577,6 +1705,8 @@ def build_parser() -> argparse.ArgumentParser:
     sound.add_argument("kind", choices=sorted(busybar_sound.KINDS))
     subparsers.add_parser("state", help="print the shared session state")
     subparsers.add_parser("doctor", help="check the installation and the connection to the bar")
+    subparsers.add_parser("statusline-install", help="wrap your statusLine in settings.json (backs it up first)")
+    subparsers.add_parser("statusline-uninstall", help="restore the statusLine setting from before statusline-install")
     statusline = subparsers.add_parser("statusline", help="statusLine wrapper that records plan usage, model and context")
     statusline.add_argument("--next", dest="next_command", help="your existing statusLine command, run with the same input")
     subparsers.add_parser("_dispatch")
@@ -1604,6 +1734,14 @@ def main(argv: Optional[list[str]] = None) -> int:
         return handle_hook(config, payload)
     if args.command == "doctor":
         return doctor(config)
+    if args.command in ("statusline-install", "statusline-uninstall"):
+        try:
+            action = install_statusline if args.command == "statusline-install" else uninstall_statusline
+            print(action(claude_dir() / "settings.json"))
+            return 0
+        except (StatuslineError, OSError) as error:
+            print("error: %s" % error, file=sys.stderr)
+            return 1
     if args.command == "statusline":
         return run_statusline(statusline_config(config), args.next_command)
     if args.command == "_dispatch":

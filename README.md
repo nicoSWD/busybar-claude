@@ -277,19 +277,34 @@ this part is opt-in: you point your own `statusLine` at the plugin's wrapper,
 which records the data and then runs your existing statusline command with the
 same input, so what you see in the terminal does not change.
 
-Add this to `~/.claude/settings.json`, replacing the text after `--next` with your
-current `statusLine` command (leave `--next` out if you have none):
+Set it up with one command. It backs up `~/.claude/settings.json` first (to
+`settings.json.busybar-backup`), keeps your current `statusLine` command as the one
+that is still shown, and can be undone:
+
+```sh
+python3 "$(find ~/.claude/plugins/cache -name busybar_status.py -path '*busy-claude*' | head -1)" statusline-install
+# undo:  ... statusline-uninstall
+```
+
+(From a clone, or with `--plugin-dir`, run `scripts/busybarctl statusline-install`
+instead. The [install script](#install-with-one-command) asks about it, too, and
+`/busy-claude:setup` can do it for you if you ask.) The wrapped command looks like
+this, and you can also write it into `settings.json` yourself:
 
 ```json
 {
   "statusLine": {
     "type": "command",
-    "command": "python3 ~/.claude/skills/busy-claude/scripts/busybar_status.py statusline --next \"your-current-statusline-command\""
+    "command": "python3 /path/to/claude-busy-bar/statusline.py statusline --next \"your-current-statusline-command\""
   }
 }
 ```
 
-On Windows use the full path to the script instead of `~`.
+`statusline.py` is a small launcher the plugin refreshes at every session start in
+its cache folder (`~/Library/Caches/claude-busy-bar` on macOS,
+`~/.cache/claude-busy-bar` on Linux, `%LOCALAPPDATA%\claude-busy-bar` on Windows).
+It always runs the current plugin version, so plugin updates do not break the setting.
+Leave `--next` out if you have no statusline of your own.
 
 What it does:
 

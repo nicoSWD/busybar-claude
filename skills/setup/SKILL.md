@@ -44,4 +44,9 @@ Never ask the user to type the password to you and never put it in a command.
 
 ## 4. Optional: plan usage on the READY screen
 
-Mention once that the READY screen can show plan usage if the statusline wrapper is set up (the check lists whether it is). Only change `~/.claude/settings.json` if the user asks you to, make a backup copy first, and keep their existing `statusLine` command by passing it with `--next` (see the README section on the optional statusline).
+Mention once that the READY screen can show plan usage if the statusline wrapper is set up (the check lists whether it is). Only set it up if the user asks. The command makes a backup of `~/.claude/settings.json`, keeps their existing `statusLine` command, and can be undone:
+
+```sh
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/busybar_status.py" statusline-install
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/busybar_status.py" statusline-uninstall
+```

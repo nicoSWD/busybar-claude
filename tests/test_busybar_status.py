@@ -512,6 +512,86 @@ class StatusTests(unittest.TestCase):
         with store.lock():
             self.assertNotIn("last_error", store.load_unlocked())
 
+    def statusline_sandbox(self):
+        cache = Path(self.tempdir.name) / "cache"
+        settings = Path(self.tempdir.name) / "claude" / "settings.json"
+        return cache, settings, mock.patch.object(status, "default_state_dir", return_value=cache)
+
+    def test_launcher_is_stable_and_follows_the_plugin_when_it_moves(self):
+        cache, _, patched = self.statusline_sandbox()
+        with patched:
+            first = status.write_launcher(Path("/plugins/v1/scripts/busybar_status.py"))
+            written = first.stat().st_mtime_ns
+            self.assertEqual(status.write_launcher(Path("/plugins/v1/scripts/busybar_status.py")), first)
+            self.assertEqual(first.stat().st_mtime_ns, written, "unchanged content is not rewritten")
+            status.write_launcher(Path("/plugins/v2/scripts/busybar_status.py"))
+            self.assertIn("/plugins/v2/scripts/busybar_status.py", first.read_text())
+            self.assertNotIn("/plugins/v1/", first.read_text())
+        self.assertEqual(first.parent, cache)
+
+    def test_launcher_runs_the_script_and_the_wrapped_command_chains_the_original(self):
+        import subprocess
+        cache, settings, patched = self.statusline_sandbox()
+        script = Path(status.__file__).resolve()
+        with patched:
+            status.install_statusline(settings, python=sys.executable)
+            wrapped = json.loads(settings.read_text())["statusLine"]["command"]
+        env = dict(os.environ, BUSYBAR_STATE_DIR=str(Path(self.tempdir.name) / "state"))
+        payload = json.dumps({"session_id": "s1", "model": {"display_name": "Fable 5"}}).encode()
+        result = subprocess.run(wrapped, shell=True, input=payload, stdout=subprocess.PIPE, env=env, timeout=30)
+        self.assertEqual(result.returncode, 0)
+        with status.Store(dataclasses.replace(self.config, state_dir=Path(self.tempdir.name) / "state")).lock():
+            data = json.loads((Path(self.tempdir.name) / "state" / "state.json").read_text())
+        self.assertEqual(data["meta"]["s1"]["model"], "Fable 5")
+        self.assertIn(str(script), (cache / status.LAUNCHER_NAME).read_text())
+
+    def test_statusline_install_wraps_the_existing_command_and_uninstall_restores_it_exactly(self):
+        import subprocess
+        _, settings, patched = self.statusline_sandbox()
+        settings.parent.mkdir(parents=True)
+        original = {"theme": "dark", "statusLine": {"type": "command", "command": "tr a-z A-Z", "padding": 2}}
+        settings.write_text(json.dumps(original))
+        with patched:
+            self.assertIn("set up", status.install_statusline(settings, python=sys.executable))
+            wrapped = json.loads(settings.read_text())
+            self.assertEqual(wrapped["theme"], "dark")
+            self.assertEqual(wrapped["statusLine"]["padding"], 2)
+            self.assertIn("--next", wrapped["statusLine"]["command"])
+            self.assertTrue(status.is_wrapped_statusline(wrapped["statusLine"]["command"]))
+            backups = list(settings.parent.glob("settings.json.busybar-backup*"))
+            self.assertEqual(json.loads(backups[0].read_text()), original)
+            self.assertIn("already set up", status.install_statusline(settings, python=sys.executable))
+            self.assertEqual(json.loads(settings.read_text()), wrapped, "installing twice changes nothing")
+            self.assertIn("restored", status.uninstall_statusline(settings))
+            self.assertEqual(json.loads(settings.read_text()), original)
+            self.assertIn("not set up", status.uninstall_statusline(settings))
+
+    def test_statusline_install_without_an_existing_statusline_and_uninstall_removes_the_key(self):
+        _, settings, patched = self.statusline_sandbox()
+        with patched:
+            status.install_statusline(settings)
+            command = json.loads(settings.read_text())["statusLine"]["command"]
+            self.assertTrue(command.startswith("python3 "))
+            self.assertNotIn("--next", command)
+            status.uninstall_statusline(settings)
+        self.assertNotIn("statusLine", json.loads(settings.read_text()))
+
+    def test_statusline_install_refuses_files_it_cannot_understand(self):
+        _, settings, patched = self.statusline_sandbox()
+        settings.parent.mkdir(parents=True)
+        for text in ("{not json", "[1, 2]", json.dumps({"statusLine": "echo hi"})):
+            settings.write_text(text)
+            with patched, self.assertRaises(status.StatuslineError):
+                status.install_statusline(settings)
+            self.assertEqual(settings.read_text(), text, "left untouched")
+        self.assertEqual(list(settings.parent.glob("*backup*")), [])
+
+    def test_statusline_commands_are_quoted_for_spaces_and_quotes(self):
+        command = status.statusline_command("my script --flag 'x'", Path("/a b/statusline.py"))
+        import shlex
+        parts = shlex.split(command)
+        self.assertEqual(parts, ["python3", "/a b/statusline.py", "statusline", "--next", "my script --flag 'x'"])
+
     def test_windows_lock_retries_until_free_and_unlocks(self):
         calls = []
 
