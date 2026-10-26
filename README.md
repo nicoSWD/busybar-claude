@@ -108,8 +108,8 @@ x 0-15    mascot      16x16 looping animation, one per state
           text        centered on the whole display
             rows 1-5    WORKING          small font, state color (rows 6-10, centered, when alone)
             rows 8-11   Editing          tiny font, white (WORKING only)
-            rows 14-15  comet            sweeping the column (WORKING only)
-x 52-71   rows 0-5   permission-mode badge (not shown in the default mode)
+            rows 14-15  comet            32px wide under the text, x 20-51 (WORKING only)
+x 55-71   rows 12-15 permission-mode badge, colored text (not shown in the default mode)
 ```
 
 ### Mascot
@@ -138,7 +138,7 @@ The subtitle says what Claude is doing, derived from the tool in `PreToolUse`:
 and after a permission wait). `PostToolUse` keeps the previous subtitle. Every
 other state shows the label only.
 
-The comet is a glowing head that eases back and forth along a dim rail, trail
+The comet is a glowing head that eases back and forth along a dim 32 px rail, trail
 fading behind it, in the configured `WORKING` color
 (`scripts/busybar_anim.py`, which also holds a pure-Python encoder for the bar's
 `.anim` format). Set `WORKING_ANIMATION` to `false` to skip it.
@@ -151,8 +151,7 @@ anchored at the column's left edge and scrolls rather than covering the mascot.
 ### Permission-mode badge
 
 Claude Code reports the session's permission mode in the hook input (`permission_mode`),
-so the bar can show it as a small colored pill in the top-right corner, the word cut
-out of the pill:
+so the bar can show it as a short colored word in the bottom-right corner:
 
 | Mode | Badge |
 | --- | --- |
@@ -164,10 +163,11 @@ out of the pill:
 | Default ("Manual") | no badge |
 
 The badge follows the session whose state the bar is showing and stays across state changes.
-Changing it redraws only the pill, so the mascot and comet keep animating. The words are
-four letters so the pill (at most 19 px wide) clears the title. Set `MODE_BADGE` to `false`
-to turn it off. The tiny-font glyph widths needed to size the pill are in
-`scripts/busybar_font.py`.
+Changing it redraws only the word, so the mascot and comet keep animating. The words are four
+letters (at most 17 px, so they start at x=55) to stay clear of the longest subtitle, and the
+comet is a fixed 32 px, centered under the text, so it ends before the badge begins. Set
+`MODE_BADGE` to `false` to turn the badge off. The tiny-font glyph widths needed to place it
+are in `scripts/busybar_font.py`.
 
 ### Waiting dots
 

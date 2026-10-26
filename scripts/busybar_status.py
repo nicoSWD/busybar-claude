@@ -111,12 +111,13 @@ SUBTITLE_Y = 7
 SUBTITLE_COLOR = "#FFFFFFFF"
 ANIMATION_ID = "claude-anim"
 ANIMATION_Y = 14
-MODE_BG_ID = "claude-mode-bg"
+COMET_WIDTH = 32  # as wide as the title "WORKING", centered under the text: leaves the corner for the badge
+COMET_X = (72 - COMET_WIDTH) // 2
 MODE_ID = "claude-mode"
-BADGE_HEIGHT = 6  # rows 0-5, top-right; `tiny` caps are rows 1-4 inside it
-BADGE_PAD = 1  # pixels either side of the word
-# permission_mode -> (word, pill color). Words are short so the pill clears the title: the widest
-# title with a subtitle ("WORKING") ends at x=51, so a pill starts at x>=53 to leave a gap.
+BADGE_Y = 11  # `tiny` caps sit one row below y: rows 12-15, flush with the bottom edge
+# permission_mode -> (word, text color). Plain text in the bottom-right corner. Words are at most
+# 17px wide so they start at x>=55: right of the comet (x 20-51) and of a subtitle's last letter
+# (the longest, "Compacting", ends at x=54).
 MODE_BADGES = {
     "plan": ("PLAN", "#20C9A6FF"),
     "acceptEdits": ("EDIT", "#4A8CFFFF"),
@@ -129,8 +130,8 @@ DOTS_GAP = 1  # pixels between the last letter and the first dot, as between let
 MASCOT_ID = "claude-mascot"
 MASCOT_WIDTH = busybar_mascot.SIZE
 DISPLAY_WIDTH = 72
-MANAGED_IDS = (TITLE_ID, SUBTITLE_ID, MASCOT_ID, ANIMATION_ID, DOTS_ID, MODE_BG_ID, MODE_ID)
-LAYOUT_VERSION = 7  # bump to force a redraw after changing the layout above
+MANAGED_IDS = (TITLE_ID, SUBTITLE_ID, MASCOT_ID, ANIMATION_ID, DOTS_ID, MODE_ID)
+LAYOUT_VERSION = 8  # bump to force a redraw after changing the layout above
 ASSET_RETRY_SECONDS = 60.0
 ASSET_UPLOAD_TIMEOUT = 15.0
 
@@ -537,35 +538,19 @@ class BusyBarClient:
         if MASCOT_ID in assets:
             wanted[MASCOT_ID] = animation_element(MASCOT_ID, 0, 0)
         if ANIMATION_ID in assets:
-            wanted[ANIMATION_ID] = animation_element(ANIMATION_ID, config.column_x, ANIMATION_Y)
+            wanted[ANIMATION_ID] = animation_element(ANIMATION_ID, COMET_X, ANIMATION_Y)
         if config.mode_badge and mode in MODE_BADGES:
-            word, pill_color = MODE_BADGES[mode]
-            width = busybar_font.text_width(word, SUBTITLE_FONT) + 2 * BADGE_PAD
-            left = DISPLAY_WIDTH - width
-            wanted[MODE_BG_ID] = {
-                "id": MODE_BG_ID,
-                "type": "rectangle",
-                "display": "front",
-                "x": left,
-                "y": 0,
-                "width": width,
-                "height": BADGE_HEIGHT,
-                "radius": 0,
-                "fill": "solid",
-                "fill_colors": [pill_color],
-                "border_width": 0,
-                "border_color": "#00000000",
-            }
-            wanted[MODE_ID] = {  # black on the pill: LED off, so the word reads as cut out
+            word, word_color = MODE_BADGES[mode]
+            wanted[MODE_ID] = {
                 "id": MODE_ID,
                 "type": "text",
                 "display": "front",
                 "text": word,
                 "font": SUBTITLE_FONT,
-                "color": "#000000FF",
+                "color": word_color,
                 "align": "top_left",
-                "x": left + BADGE_PAD,
-                "y": 0,
+                "x": DISPLAY_WIDTH - busybar_font.text_width(word, SUBTITLE_FONT),
+                "y": BADGE_Y,
             }
         return wanted
 
@@ -745,10 +730,10 @@ def asset_plan(config: Config, status: str) -> Dict[str, Tuple[str, Callable[[],
         dots_color = config.colors[status]
         plan[DOTS_ID] = (busybar_anim.dots_asset_name(dots_color), lambda: busybar_anim.dots_animation(dots_color))
     if status == "WORKING" and config.animation:
-        color, width = config.colors["WORKING"], config.column_width
+        color = config.colors["WORKING"]
         plan[ANIMATION_ID] = (
-            busybar_anim.animation_asset_name(color, width),
-            lambda: busybar_anim.working_animation(color, width),
+            busybar_anim.animation_asset_name(color, COMET_WIDTH),
+            lambda: busybar_anim.working_animation(color, COMET_WIDTH),
         )
     return plan
 

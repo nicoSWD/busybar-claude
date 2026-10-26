@@ -365,8 +365,8 @@ class StatusTests(unittest.TestCase):
         self.assertEqual(device.screen[status.MASCOT_ID]["path"], mascot.asset_name("WORKING"))
         self.assertEqual((device.screen[status.MASCOT_ID]["x"], device.screen[status.MASCOT_ID]["y"]), (0, 0))
         comet = device.screen[status.ANIMATION_ID]
-        self.assertEqual(comet["path"], anim.animation_asset_name(self.config.colors["WORKING"], 56))
-        self.assertEqual((comet["x"], comet["y"], comet["loop"]), (16, status.ANIMATION_Y, True))
+        self.assertEqual(comet["path"], anim.animation_asset_name(self.config.colors["WORKING"], 32))
+        self.assertEqual((comet["x"], comet["y"], comet["loop"]), (20, status.ANIMATION_Y, True), "32px, under the text")
         title = device.screen[status.TITLE_ID]
         self.assertEqual((title["align"], title["x"]), ("top_mid", 36), "centered on the whole display")
         self.assertNotIn("width", title)
@@ -506,19 +506,20 @@ class StatusTests(unittest.TestCase):
         self.assertNotEqual(status.render_fingerprint(self.config, "WORKING", "Thinking", "plan"),
                             status.render_fingerprint(self.config, "WORKING", "Thinking", ""))
 
-    def test_mode_badge_is_a_pill_in_the_top_right_corner(self):
+    def test_mode_badge_is_colored_text_in_the_bottom_right_corner(self):
         client = status.BusyBarClient(self.config)
         for mode, (word, color) in status.MODE_BADGES.items():
-            wanted = client.elements("WORKING", activity="Reading", mode=mode)
-            pill, text = wanted[status.MODE_BG_ID], wanted[status.MODE_ID]
-            width = font.text_width(word, "tiny") + 2
-            self.assertEqual((pill["type"], pill["x"], pill["y"], pill["width"], pill["height"]), ("rectangle", 72 - width, 0, width, 6), mode)
-            self.assertEqual((pill["fill"], pill["fill_colors"]), ("solid", [color]))
-            self.assertEqual((text["text"], text["x"], text["y"], text["font"], text["color"]), (word, 72 - width + 1, 0, "tiny", "#000000FF"))
-            self.assertEqual(list(wanted)[-2:], [status.MODE_BG_ID, status.MODE_ID], "text is drawn over the pill")
-            title = wanted[status.TITLE_ID]
-            title_end = 36 - font.text_width("WORKING") // 2 + font.text_width("WORKING")  # first free column
-            self.assertGreaterEqual(pill["x"], title_end + 1, "clear of the widest title with a subtitle, with a gap")
+            wanted = client.elements("WORKING", activity="Compacting", mode=mode, assets={status.ANIMATION_ID: "comet.anim"})
+            text = wanted[status.MODE_ID]
+            width = font.text_width(word, "tiny")
+            self.assertEqual((text["text"], text["font"], text["color"], text["align"]), (word, "tiny", color, "top_left"), mode)
+            self.assertEqual((text["x"], text["y"]), (72 - width, status.BADGE_Y), "flush with the bottom-right corner")
+            self.assertEqual(text["y"] + 1 + 3, 15, "caps end on the last row")
+            self.assertNotIn("claude-mode-bg", wanted, "no pill")
+            comet_end = wanted[status.ANIMATION_ID]["x"] + status.COMET_WIDTH
+            self.assertLess(comet_end, text["x"], "the comet stops before the badge")
+            subtitle_end = 36 - font.text_width("Compacting", "tiny") // 2 + font.text_width("Compacting", "tiny")
+            self.assertLessEqual(subtitle_end, text["x"], "and so does the longest subtitle")
         for none in ("", "default", "mystery"):
             self.assertEqual(set(client.elements("WORKING", mode=none)), {status.TITLE_ID})
         off = status.BusyBarClient(dataclasses.replace(self.config, mode_badge=False))
@@ -527,7 +528,7 @@ class StatusTests(unittest.TestCase):
     def test_mode_changes_redraw_only_the_badge(self):
         device = FakeDevice()
         self.drive(device, [("UserPromptSubmit", {"permission_mode": "default"})])
-        self.assertNotIn(status.MODE_BG_ID, device.screen)
+        self.assertNotIn(status.MODE_ID, device.screen)
         mascot_before, comet_before = dict(device.screen[status.MASCOT_ID]), dict(device.screen[status.ANIMATION_ID])
         device.calls.clear()
         self.drive(device, [("PostToolUse", {"permission_mode": "plan"})])
@@ -537,7 +538,6 @@ class StatusTests(unittest.TestCase):
         self.assertEqual(device.screen[status.MODE_ID]["text"], "AUTO")
         self.assertEqual((device.screen[status.MASCOT_ID], device.screen[status.ANIMATION_ID]), (mascot_before, comet_before))
         self.drive(device, [("PostToolUse", {"permission_mode": "default"})])
-        self.assertNotIn(status.MODE_BG_ID, device.screen)
         self.assertNotIn(status.MODE_ID, device.screen)
 
     def test_badge_survives_state_changes(self):
@@ -612,7 +612,7 @@ class StatusTests(unittest.TestCase):
         device = FakeDevice()
         self.drive(device, [("UserPromptSubmit", {})], config=dataclasses.replace(self.config, mascot=False))
         comet = device.screen[status.ANIMATION_ID]
-        self.assertEqual((comet["x"], comet["path"]), (0, anim.animation_asset_name(self.config.colors["WORKING"], 72)))
+        self.assertEqual((comet["x"], comet["path"]), (20, anim.animation_asset_name(self.config.colors["WORKING"], 32)))
 
     def test_erase_tolerates_elements_that_are_already_gone(self):
         device = FakeDevice()
