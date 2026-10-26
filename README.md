@@ -113,7 +113,7 @@ A pixel-art Claude (orange, blocky, eyes as cut-outs) reacts to the state:
 | State | Animation |
 | --- | --- |
 | `WORKING` | sits behind a laptop typing, a glowing logo on the lid, ellipsis dots pulsing overhead |
-| `WAITING_FOR_INPUT` | glances left and right, taps a foot, amber `?` bobbing |
+| `WAITING_FOR_INPUT` | glances left and right, taps a foot, amber `?` bobbing; the label reads `WAITING` followed by animated dots (`.`, `..`, `...`) |
 | `LIMIT` | worn out and sweating beside a running hourglass |
 | `FINISHED` | jumps twice in a shower of confetti, then waves with twinkling sparkles |
 | `ERROR` | dizzy X eyes, shakes, red `!`, a puff of smoke |
@@ -141,6 +141,17 @@ Text is centered on the whole display. A label too wide to clear the mascot
 (over about 8 characters in the title font) is centered in the 56px column
 beside it instead, and one too wide for that column (about 11 characters) is
 anchored at the column's left edge and scrolls rather than covering the mascot.
+
+### Waiting dots
+
+While Claude waits for input the label is followed by three dots that appear one
+after another. Text cannot animate, so the dots are a tiny 5×1 looping animation
+(`busybar_anim.dots_animation`) placed on the label's baseline one pixel after its
+last letter, in the `WAITING` color. The label and dots are centered together as
+one unit, which needs exact label widths: `scripts/busybar_font.py` holds the glyph
+widths of the title font, measured from a real bar's framebuffer. If the label plus
+dots would not fit, or the dots' asset could not be uploaded, the plain label is
+shown. Set `WAITING_DOTS` to `false` to turn them off.
 
 ### Regenerating the picture
 

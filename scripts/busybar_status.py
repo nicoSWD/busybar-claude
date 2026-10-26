@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, Mapping, Optional, Sequence, Tuple
 
 import busybar_anim
+import busybar_font
 import busybar_mascot
 
 
@@ -113,11 +114,13 @@ ANIMATION_Y = 14
 # Estimated advance per character (px), to decide where a label fits. Measured on the device:
 # "WORKING" is 32px in `small`, "Searching" 31px in `tiny`.
 GLYPH_ADVANCE = {"small": 5, "tiny": 4}
+DOTS_ID = "claude-dots"
+DOTS_GAP = 1  # pixels between the last letter and the first dot, as between letters
 MASCOT_ID = "claude-mascot"
 MASCOT_WIDTH = busybar_mascot.SIZE
 DISPLAY_WIDTH = 72
-MANAGED_IDS = (TITLE_ID, SUBTITLE_ID, MASCOT_ID, ANIMATION_ID)
-LAYOUT_VERSION = 5  # bump to force a redraw after changing the layout above
+MANAGED_IDS = (TITLE_ID, SUBTITLE_ID, MASCOT_ID, ANIMATION_ID, DOTS_ID)
+LAYOUT_VERSION = 6  # bump to force a redraw after changing the layout above
 ASSET_RETRY_SECONDS = 60.0
 ASSET_UPLOAD_TIMEOUT = 15.0
 
@@ -177,6 +180,7 @@ class Config:
     application_name: str = "claude-code-status"
     animation: bool = True
     mascot: bool = True
+    waiting_dots: bool = True
     subtitle_color: str = SUBTITLE_COLOR
 
     @property
@@ -219,6 +223,7 @@ class Config:
             colors=colors,
             animation=_as_bool(_env("WORKING_ANIMATION", "true"), True),
             mascot=_as_bool(_env("MASCOT", "true"), True),
+            waiting_dots=_as_bool(_env("WAITING_DOTS", "true"), True),
             subtitle_color=valid_color(_env("SUBTITLE_COLOR", SUBTITLE_COLOR), SUBTITLE_COLOR),
         )
 
@@ -484,6 +489,19 @@ class BusyBarClient:
         wanted = {TITLE_ID: text_element(TITLE_ID, text, TITLE_FONT, title_y, rgba)}
         if subtitle:
             wanted[SUBTITLE_ID] = text_element(SUBTITLE_ID, subtitle, SUBTITLE_FONT, SUBTITLE_Y, config.subtitle_color)
+        if DOTS_ID in assets:
+            # Lay the label and its animated dots out as one unit centered like a plain title.
+            label_width = busybar_font.text_width(text, TITLE_FONT)
+            unit = label_width + DOTS_GAP + busybar_anim.DOTS_WIDTH
+            if not config.mascot or unit <= DISPLAY_WIDTH - 2 * MASCOT_WIDTH:
+                center = DISPLAY_WIDTH // 2
+            else:
+                center = config.column_x + config.column_width // 2
+            left = center - unit // 2
+            if left >= config.column_x:  # otherwise it cannot fit: show the plain label, no dots
+                wanted[TITLE_ID].update(align="top_left", x=left)
+                wanted[TITLE_ID].pop("width", None)
+                wanted[DOTS_ID] = animation_element(DOTS_ID, left + label_width + DOTS_GAP, title_y + 6)
         if MASCOT_ID in assets:
             wanted[MASCOT_ID] = animation_element(MASCOT_ID, 0, 0)
         if ANIMATION_ID in assets:
@@ -635,6 +653,7 @@ def render_fingerprint(config: Config, status: str, activity: str = "") -> str:
             config.subtitle_color,
             config.animation,
             config.mascot,
+            config.waiting_dots,
             activity,
         ],
         separators=(",", ":"),
@@ -647,6 +666,9 @@ def asset_plan(config: Config, status: str) -> Dict[str, Tuple[str, Callable[[],
     plan: Dict[str, Tuple[str, Callable[[], bytes]]] = {}
     if config.mascot:
         plan[MASCOT_ID] = (busybar_mascot.asset_name(status), lambda: busybar_mascot.animation(status))
+    if status == "WAITING_FOR_INPUT" and config.waiting_dots:
+        dots_color = config.colors[status]
+        plan[DOTS_ID] = (busybar_anim.dots_asset_name(dots_color), lambda: busybar_anim.dots_animation(dots_color))
     if status == "WORKING" and config.animation:
         color, width = config.colors["WORKING"], config.column_width
         plan[ANIMATION_ID] = (

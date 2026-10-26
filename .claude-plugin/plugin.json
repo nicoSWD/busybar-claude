@@ -151,6 +151,12 @@
       "description": "Show an animated Claude mascot on the left of the display that reacts to the current state. Uploads five small animations to the bar.",
       "default": true
     },
+    "WAITING_DOTS": {
+      "type": "boolean",
+      "title": "Waiting dots",
+      "description": "Animate dots after the label while Claude waits for input, like WAITING... Uploads one tiny animation to the bar.",
+      "default": true
+    },
     "WORKING_ANIMATION": {
       "type": "boolean",
       "title": "Working animation",

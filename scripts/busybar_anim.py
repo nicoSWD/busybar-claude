@@ -170,3 +170,28 @@ def animation_asset_name(color: str, width: int = ANIMATION_WIDTH) -> str:
 
 def working_animation(color: str, width: int = ANIMATION_WIDTH) -> bytes:
     return encode_anim(width, ANIMATION_HEIGHT, ANIMATION_FPS, comet_frames(parse_rgb(color), width))
+
+
+DOTS_WIDTH = 5  # three 1px dots with a 1px gap, like the "." glyph's spacing in the title font
+DOTS_FPS = 3  # one step per ~0.33s: nothing, ., .., ... and around
+
+
+def dots_frames(color: str) -> List[bytes]:
+    r, g, b = parse_rgb(color)
+    frames = []
+    for lit in range(4):
+        row = bytearray(DOTS_WIDTH * 3)
+        for dot in range(lit):
+            row[dot * 6:dot * 6 + 3] = bytes([b, g, r])  # BGR
+        frames.append(bytes(row))
+    return frames
+
+
+def dots_asset_name(color: str) -> str:
+    material = "%d:%d:%s" % (ANIMATION_VERSION, DOTS_FPS, color[1:7].upper())
+    return "dots-%s.anim" % hashlib.sha256(material.encode("ascii")).hexdigest()[:8]
+
+
+def dots_animation(color: str) -> bytes:
+    """A 5x1 animation of dots appearing one by one, to follow a label as "WAITING...". """
+    return encode_anim(DOTS_WIDTH, 1, DOTS_FPS, dots_frames(color))

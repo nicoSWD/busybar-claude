@@ -20,6 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import busybar_anim as anim  # noqa: E402
+import busybar_font as font  # noqa: E402
 import busybar_mascot as mascot  # noqa: E402
 import busybar_status as status  # noqa: E402
 
@@ -350,6 +351,7 @@ class StatusTests(unittest.TestCase):
                 ("POST", "/assets/upload"),
                 ("POST", "/assets/upload"),
                 ("POST", "/display/draw"),
+                ("DELETE", "/display/draw"),  # device state unknown at first: erase a possible leftover
             ],
         )
         self.assertEqual(
@@ -393,7 +395,9 @@ class StatusTests(unittest.TestCase):
             self.drive(device, [(event, extra)])
             self.assertEqual(device.screen[status.MASCOT_ID]["path"], mascot.asset_name(expected))
             self.assertEqual(device.screen[status.TITLE_ID]["text"], label)
-            if expected != "WORKING":
+            if expected == "WAITING_FOR_INPUT":
+                self.assertEqual(set(device.screen), {status.TITLE_ID, status.MASCOT_ID, status.DOTS_ID}, expected)
+            elif expected != "WORKING":
                 self.assertEqual(set(device.screen), {status.TITLE_ID, status.MASCOT_ID}, expected)
 
     def test_leaving_working_posts_then_erases_subtitle_and_comet(self):
@@ -455,6 +459,50 @@ class StatusTests(unittest.TestCase):
         medium = client.elements("IDLE", label="PLEASE WAIT")[status.TITLE_ID]  # 11 chars: too wide for the display center
         self.assertEqual((medium["align"], medium["x"]), ("top_mid", 44))
         self.assertNotIn("width", medium)
+
+    def test_waiting_dots_follow_the_label_and_are_centered_with_it(self):
+        client = status.BusyBarClient(self.config)
+        dots_name = anim.dots_asset_name(self.config.colors["WAITING_FOR_INPUT"])
+        wanted = client.elements("WAITING_FOR_INPUT", assets={status.DOTS_ID: dots_name})
+        title, dots = wanted[status.TITLE_ID], wanted[status.DOTS_ID]
+        label = font.text_width("WAITING")  # 28
+        unit = label + status.DOTS_GAP + anim.DOTS_WIDTH  # "WAITING..." is 34px wide
+        self.assertEqual((label, unit), (28, 34))
+        self.assertEqual((title["align"], title["x"]), ("top_left", 36 - unit // 2))
+        self.assertEqual((dots["x"], dots["y"]), (title["x"] + label + 1, title["y"] + 6), "on the baseline, one px after the G")
+        self.assertEqual((dots["path"], dots["loop"]), (dots_name, True))
+        self.assertGreaterEqual(title["x"], 16, "clear of the mascot")
+        # without the asset (failed upload, or disabled) the label is a plain centered title
+        plain = client.elements("WAITING_FOR_INPUT")
+        self.assertEqual(set(plain), {status.TITLE_ID})
+        self.assertEqual((plain[status.TITLE_ID]["align"], plain[status.TITLE_ID]["x"]), ("top_mid", 36))
+        # a label too wide for the display center moves its unit to the column; too wide for that, no dots
+        medium = client.elements("WAITING_FOR_INPUT", label="PLEASE WAIT", assets={status.DOTS_ID: dots_name})
+        self.assertEqual(medium[status.TITLE_ID]["x"], 44 - (font.text_width("PLEASE WAIT") + 6) // 2)
+        huge = client.elements("WAITING_FOR_INPUT", label="PLEASE WAIT FOR ME", assets={status.DOTS_ID: dots_name})
+        self.assertNotIn(status.DOTS_ID, huge)
+        bare = status.BusyBarClient(dataclasses.replace(self.config, mascot=False))
+        self.assertEqual(bare.elements("WAITING_FOR_INPUT", assets={status.DOTS_ID: dots_name})[status.TITLE_ID]["x"], 36 - 17)
+
+    def test_dots_are_only_for_waiting_and_can_be_disabled(self):
+        for state in status.STATUSES:
+            self.assertEqual(status.DOTS_ID in status.asset_plan(self.config, state), state == "WAITING_FOR_INPUT", state)
+        off = dataclasses.replace(self.config, waiting_dots=False)
+        self.assertNotIn(status.DOTS_ID, status.asset_plan(off, "WAITING_FOR_INPUT"))
+        device = FakeDevice()
+        self.drive(device, [("PermissionRequest", {})], config=off)
+        self.assertEqual(set(device.screen), {status.TITLE_ID, status.MASCOT_ID})
+
+    def test_waiting_to_working_removes_the_dots_and_back_again(self):
+        device = FakeDevice()
+        self.drive(device, [("PermissionRequest", {})])
+        self.assertIn(status.DOTS_ID, device.screen)
+        dots = dict(device.screen[status.DOTS_ID])
+        self.drive(device, [("PostToolUse", {})])
+        self.assertNotIn(status.DOTS_ID, device.screen)
+        self.assertEqual(device.screen[status.TITLE_ID]["align"], "top_mid", "title back to plain centering")
+        self.drive(device, [("PermissionRequest", {})])
+        self.assertEqual(device.screen[status.DOTS_ID], dots)
 
     def test_long_labels_scroll_inside_the_column_instead_of_covering_the_mascot(self):
         client = status.BusyBarClient(self.config)
@@ -566,7 +614,35 @@ class MascotTests(unittest.TestCase):
         self.assertNotEqual(mascot.asset_name("WORKING"), "mascot-working-v2.anim", "the fixed art got a new name")
 
 
+class FontTests(unittest.TestCase):
+    def test_widths_match_what_the_device_draws(self):
+        # measured on a real bar from the framebuffer
+        for text, width in [("WORKING", 32), ("WAITING", 28), ("FINISHED", 33), ("LIMIT", 17), ("IDLE", 15),
+                            ("ERROR", 24), ("READY", 23), ("WAITING...", 34), ("PLEASE WAIT", 47)]:
+            self.assertEqual(font.text_width(text), width, text)
+        self.assertEqual(font.text_width(""), 0)
+
+
 class AnimationTests(unittest.TestCase):
+    def test_dots_animation_counts_up_and_loops(self):
+        blob = anim.dots_animation("#FFB000FF")
+        self.assertEqual(blob[9:11], bytes([5, 1]))
+        section_len = struct.unpack("<I", blob[16:20])[0]
+        records, offset, frames = blob[36 + section_len:], 0, []
+        while offset < len(records):
+            encoding, duration, length = struct.unpack("<BBH", records[offset:offset + 4])
+            payload = records[offset + 4:offset + 4 + length]
+            frames.append(anim.rle_decompress(payload) if encoding == 1 else payload)
+            offset += 4 + length
+        lit = [sum(1 for i in range(0, 15, 3) if frame[i:i + 3] != b"\x00\x00\x00") for frame in frames]
+        self.assertEqual(lit, [0, 1, 2, 3])
+        self.assertEqual(frames[3][:3], bytes([0x00, 0xB0, 0xFF]), "amber in BGR order")
+        self.assertEqual([frames[3][i:i + 3] != b"\x00\x00\x00" for i in (0, 3, 6, 9, 12)], [True, False, True, False, True])
+
+    def test_dots_asset_name_tracks_color(self):
+        self.assertNotEqual(anim.dots_asset_name("#FFB000FF"), anim.dots_asset_name("#FF0000FF"))
+        self.assertEqual(anim.dots_asset_name("#FFB000FF"), anim.dots_asset_name("#FFB00000"))
+
     def test_rle_round_trips_runs_and_noise(self):
         samples = [
             b"",
