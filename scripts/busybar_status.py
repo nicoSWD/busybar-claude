@@ -10,7 +10,6 @@ from __future__ import annotations
 import argparse
 import contextlib
 import dataclasses
-import fcntl
 import hashlib
 import json
 import os
@@ -23,6 +22,12 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Sequence, Tuple
+
+IS_WINDOWS = os.name == "nt"
+if IS_WINDOWS:
+    import msvcrt
+else:
+    import fcntl
 
 import busybar_anim
 import busybar_font
@@ -232,6 +237,16 @@ def safe_label(value: str, default: str) -> str:
     return clean.strip()[:64] or default
 
 
+def default_state_dir() -> Path:
+    """Per-user cache folder for when Claude Code does not provide a plugin data directory."""
+    home = Path.home()
+    if IS_WINDOWS:
+        return Path(os.environ.get("LOCALAPPDATA") or home / "AppData" / "Local") / "claude-busy-bar"
+    if sys.platform == "darwin":
+        return home / "Library" / "Caches" / "claude-busy-bar"
+    return Path(os.environ.get("XDG_CACHE_HOME") or home / ".cache") / "claude-busy-bar"
+
+
 @dataclasses.dataclass(frozen=True)
 class Config:
     base_url: str
@@ -268,10 +283,7 @@ class Config:
         if auth_mode not in {"usb", "wifi", "cloud"}:
             auth_mode = "usb"
         configured_data = os.environ.get("BUSYBAR_STATE_DIR") or os.environ.get("CLAUDE_PLUGIN_DATA")
-        if configured_data:
-            state_dir = Path(configured_data).expanduser()
-        else:
-            state_dir = Path.home() / "Library" / "Caches" / "claude-busy-bar"
+        state_dir = Path(configured_data).expanduser() if configured_data else default_state_dir()
         labels = {
             status: safe_label(_env(status.replace("WAITING_FOR_INPUT", "WAITING") + "_LABEL", default), default)
             for status, default in DEFAULT_LABELS.items()
@@ -301,6 +313,27 @@ class Config:
         )
 
 
+def _lock_file(handle: Any) -> None:
+    """Block until this process holds an exclusive lock on the file."""
+    if not IS_WINDOWS:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        return
+    # msvcrt locks a byte range from the current position; its blocking mode gives up after ~10s.
+    while True:
+        handle.seek(0)
+        try:
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            return
+        except OSError:
+            time.sleep(0.02)
+
+
+def _unlock_file(handle: Any) -> None:
+    if IS_WINDOWS:  # POSIX drops the lock when the file closes
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+
+
 class Store:
     def __init__(self, config: Config):
         self.config = config
@@ -318,8 +351,12 @@ class Store:
         self.ensure()
         path = self.dispatch_lock_path if dispatch else self.lock_path
         with path.open("a+") as handle:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-            yield
+            _lock_file(handle)
+            try:
+                yield
+            finally:
+                with contextlib.suppress(OSError):
+                    _unlock_file(handle)
 
     def load_unlocked(self) -> Dict[str, Any]:
         try:
@@ -338,7 +375,14 @@ class Store:
         temporary = self.path.with_suffix(".tmp.%d" % os.getpid())
         temporary.write_text(json.dumps(data, separators=(",", ":"), sort_keys=True), encoding="utf-8")
         os.chmod(str(temporary), 0o600)
-        os.replace(str(temporary), str(self.path))
+        for attempt in range(50):
+            try:
+                os.replace(str(temporary), str(self.path))
+                return
+            except PermissionError:  # Windows: a lock-free reader (busybarctl state) has the file open
+                if not IS_WINDOWS or attempt == 49:
+                    raise
+                time.sleep(0.01)
 
     def prune_unlocked(self, data: Dict[str, Any], now: float) -> bool:
         sessions = data.setdefault("sessions", {})
@@ -1126,30 +1170,63 @@ def detached(config: Config, mode: str) -> Optional[int]:
         if mode == "_dispatch":
             dispatch(config, delay=0)
         return None
-    try:
-        process = subprocess.Popen(
-            [sys.executable, str(Path(__file__).resolve()), mode],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            close_fds=True,
-            start_new_session=True,
-            env=os.environ.copy(),
-        )
-        return process.pid
-    except OSError as error:
-        log(config, "could not launch %s: %s" % (mode, error))
-        return None
+    command = [sys.executable, str(Path(__file__).resolve()), mode]
+    options: Dict[str, Any] = dict(
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        close_fds=True,
+        env=os.environ.copy(),
+    )
+    if IS_WINDOWS:
+        # No console, own process group; try to leave the hook's job object so it outlives the hook.
+        flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]
+        attempts = [flags | subprocess.CREATE_BREAKAWAY_FROM_JOB, flags]  # type: ignore[attr-defined]
+    else:
+        options["start_new_session"] = True
+        attempts = [0]
+    error: Optional[OSError] = None
+    for creationflags in attempts:
+        try:
+            if IS_WINDOWS:
+                options["creationflags"] = creationflags
+            return subprocess.Popen(command, **options).pid
+        except OSError as caught:  # breakaway is refused when the job does not allow it
+            error = caught
+    log(config, "could not launch %s: %s" % (mode, error))
+    return None
 
 
 def pid_is_alive(pid: int) -> bool:
     if pid <= 1:
         return False
+    if IS_WINDOWS:  # os.kill(pid, 0) would terminate the process on Windows
+        return _windows_pid_alive(pid)
     try:
         os.kill(pid, 0)
         return True
     except OSError:
         return False
+
+
+def _windows_pid_alive(pid: int) -> bool:
+    import ctypes
+
+    process_query_limited_information = 0x1000
+    still_active = 259
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+    kernel32.OpenProcess.restype = ctypes.c_void_p
+    kernel32.OpenProcess.argtypes = [ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong]
+    kernel32.GetExitCodeProcess.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong)]
+    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+    handle = kernel32.OpenProcess(process_query_limited_information, False, pid)
+    if not handle:
+        return ctypes.get_last_error() == 5  # access denied: it exists, we may not query it
+    try:
+        code = ctypes.c_ulong()
+        return bool(kernel32.GetExitCodeProcess(handle, ctypes.byref(code))) and code.value == still_active
+    finally:
+        kernel32.CloseHandle(handle)
 
 
 def ensure_reaper(config: Config) -> None:
@@ -1257,12 +1334,18 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Optional[list[str]] = None) -> int:
+    if IS_WINDOWS:  # the console code page cannot encode every character in an error message
+        for stream in (sys.stdout, sys.stderr):
+            with contextlib.suppress(Exception):
+                stream.reconfigure(errors="replace")  # type: ignore[union-attr]
     parser = build_parser()
     args = parser.parse_args(argv)
     config = config_with_cli(Config.from_environment(), args)
     if args.command == "hook":
         try:
-            payload = json.load(sys.stdin)
+            # Claude Code sends UTF-8; the default text decoding would follow the Windows code page.
+            stream = getattr(sys.stdin, "buffer", None)
+            payload = json.loads(stream.read().decode("utf-8", errors="replace")) if stream else json.load(sys.stdin)
             if not isinstance(payload, dict):
                 payload = {}
         except (ValueError, OSError):

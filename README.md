@@ -313,8 +313,8 @@ Design constraints learned from the device, all handled in
 
 ## Requirements
 
-- macOS (primary target) or Linux; both use the POSIX `flock` state lock. Native
-  Windows is not supported (see [Linux and Windows](#linux-and-windows))
+- macOS (primary target), Linux or Windows (see
+  [Linux and Windows](#linux-and-windows))
 - Claude Code with plugin support and the hook events in `hooks/hooks.json`
 - Python 3.9 or newer (the macOS `/usr/bin/python3` supplied by Xcode tools is
   sufficient)
@@ -364,40 +364,53 @@ about the plugin name containing "claude"; that is cosmetic.
 
 #### Linux and Windows
 
-The development and testing happened on macOS. The notes below follow from what
-the code needs; they have not been run on real Linux or Windows machines.
+Development and real-device testing happened on macOS. Linux and Windows are
+supported by the code (the Windows paths are covered by unit tests that mock the
+Windows APIs) but have **not been run on real Linux or Windows machines**.
 
 **Linux.** The install is the same as above (`~/.claude/skills/busy-claude`).
 The plugin needs `python3` 3.9 or newer on `PATH` (the hooks run
 `python3 .../busybar_status.py hook`) and nothing else: no pip packages. State is
 kept in the plugin's data directory that Claude Code provides, or in the folder
-named by `BUSYBAR_STATE_DIR`. If you run the script outside Claude Code (for
-example `busybarctl`) without either variable, it falls back to
-`~/Library/Caches/claude-busy-bar`; set `BUSYBAR_STATE_DIR` to something like
-`~/.cache/claude-busy-bar` to avoid creating a `Library` folder.
+named by `BUSYBAR_STATE_DIR`. Outside Claude Code (for example `busybarctl`)
+with neither variable set, it uses `$XDG_CACHE_HOME/claude-busy-bar`, which is
+`~/.cache/claude-busy-bar` by default.
 
 The USB address `http://10.0.4.20` only works if your system brings up the bar's
 USB network interface. If `./scripts/busybarctl check` cannot reach it, use the
 [LAN option](#option-b-lan-wi-fi) instead; it needs no USB driver.
 
-**Windows.** Native Windows is not supported. The state lock uses Python's
-`fcntl` module, which does not exist on Windows, so every hook would fail on
-import. (The failure never blocks Claude Code, but the bar will not update.) Use
-WSL2 instead:
+**Windows.** Native Windows works with Python 3.9 or newer and Claude Code
+running on Windows itself:
 
-1. Install WSL2 with a Linux distribution that has `python3` 3.9+ and Claude Code.
-2. Run Claude Code **inside WSL** and follow the Linux steps above, with the
-   plugin under the WSL home directory (`~/.claude/skills/busy-claude`), not under
-   `C:\Users\...`.
-3. Connect the bar over [LAN](#option-b-lan-wi-fi). The USB network interface is
-   attached to Windows, not to WSL, so the default `10.0.4.20` address is not
-   reachable from inside WSL. Use the bar's Wi-Fi address and set the plugin's
-   options as in [step 3](#3-point-the-plugin-at-the-bar-lan-only).
-4. Verify with `./scripts/busybarctl --url <bar-address> --auth wifi check`.
+1. Install the plugin into `%USERPROFILE%\.claude\skills\busy-claude`
+   (for example `git clone <repository-url> "%USERPROFILE%\.claude\skills\busy-claude"`).
+2. Make sure a **`python3` executable is on `PATH`**. The hooks run `python3`
+   directly, without a shell, and Claude Code's hook format has no per-OS command,
+   so `python3` must resolve to a real `.exe`. Python from the Microsoft Store
+   provides `python3.exe`. The python.org installer provides `python.exe` and
+   `py.exe` but usually not `python3.exe`: copy `python.exe` to `python3.exe` in
+   the same folder, or put a `python3.exe` copy in a folder on `PATH`. Check with
+   `python3 --version` in a new terminal. If it is missing, the hooks fail
+   (Claude Code is not blocked, but the bar will not update).
+3. Run the CLI helper as `scripts\busybarctl.cmd` instead of `./scripts/busybarctl`,
+   for example `scripts\busybarctl.cmd check`.
+4. State is kept in the plugin data directory Claude Code provides, or in
+   `%LOCALAPPDATA%\claude-busy-bar` when you run the script outside Claude Code.
+   `BUSYBAR_STATE_DIR` overrides both.
+5. Whether the bar's USB network interface comes up on Windows depends on its
+   driver. If `scripts\busybarctl.cmd check` cannot reach `10.0.4.20`, use the
+   [LAN option](#option-b-lan-wi-fi).
 
-Supporting native Windows would need the `fcntl` lock replaced (for example with
-`msvcrt.locking`), the `python3` hook command changed, and the detached
-process handling in `scripts/busybar_status.py` reworked.
+On Windows the state lock uses `msvcrt.locking`, the background update and
+reaper processes start detached from the hook (without a console window), and
+hook input is read as UTF-8 regardless of the console code page.
+
+WSL2 also works: run Claude Code inside WSL and follow the Linux steps, with the
+plugin under the WSL home directory. The bar's USB network interface is attached
+to Windows, not to WSL, so connect the bar over
+[LAN](#option-b-lan-wi-fi) and use
+`./scripts/busybarctl --url <bar-address> --auth wifi check`.
 
 ### 2. Connect the BUSY Bar
 

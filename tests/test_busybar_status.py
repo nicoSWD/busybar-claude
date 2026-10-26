@@ -283,6 +283,72 @@ class StatusTests(unittest.TestCase):
         self.now = 108
         self.assertEqual(self.shown()[0], None)
 
+    def test_windows_lock_retries_until_free_and_unlocks(self):
+        calls = []
+
+        class FakeMsvcrt:
+            LK_NBLCK, LK_UNLCK = 2, 0
+
+            def locking(self, fd, mode, size):
+                calls.append(mode)
+                if mode == self.LK_NBLCK and calls.count(self.LK_NBLCK) < 3:
+                    raise OSError("locked")
+
+        with mock.patch.object(status, "IS_WINDOWS", True), mock.patch.object(
+            status, "msvcrt", FakeMsvcrt(), create=True
+        ), mock.patch.object(status.time, "sleep"):
+            with self.store.lock():
+                self.assertEqual(calls, [2, 2, 2])  # two refusals, then the lock
+            self.assertEqual(calls[-1], 0)  # released
+
+    def test_windows_pid_check_never_signals_the_process(self):
+        with mock.patch.object(status, "IS_WINDOWS", True), mock.patch.object(
+            status, "_windows_pid_alive", return_value=True
+        ) as alive, mock.patch.object(status.os, "kill", side_effect=AssertionError("os.kill terminates on Windows")):
+            self.assertTrue(status.pid_is_alive(1234))
+            alive.assert_called_once_with(1234)
+            self.assertFalse(status.pid_is_alive(1))
+
+    def test_windows_detach_falls_back_when_breakaway_is_refused(self):
+        flags = {"DETACHED_PROCESS": 8, "CREATE_NEW_PROCESS_GROUP": 512, "CREATE_BREAKAWAY_FROM_JOB": 16777216}
+        launched = []
+
+        def popen(command, **options):
+            launched.append(options)
+            if options["creationflags"] & flags["CREATE_BREAKAWAY_FROM_JOB"]:
+                raise PermissionError("job does not allow breakaway")
+            return mock.Mock(pid=77)
+
+        with mock.patch.object(status, "IS_WINDOWS", True), mock.patch.dict(
+            os.environ, {"BUSYBAR_NO_DETACH": ""}
+        ), mock.patch.object(status.subprocess, "Popen", side_effect=popen), mock.patch.multiple(
+            status.subprocess, create=True, **flags
+        ):
+            self.assertEqual(status.detached(self.config, "_dispatch"), 77)
+        self.assertEqual(len(launched), 2)
+        self.assertTrue(all("start_new_session" not in options for options in launched))
+
+    def test_default_state_dir_per_platform(self):
+        with mock.patch.object(status, "IS_WINDOWS", True), mock.patch.dict(os.environ, {"LOCALAPPDATA": "/appdata"}):
+            self.assertEqual(status.default_state_dir(), Path("/appdata") / "claude-busy-bar")
+        with mock.patch.object(status, "IS_WINDOWS", False), mock.patch.object(status.sys, "platform", "linux"):
+            with mock.patch.dict(os.environ, {"XDG_CACHE_HOME": "/xdg"}):
+                self.assertEqual(status.default_state_dir(), Path("/xdg") / "claude-busy-bar")
+            with mock.patch.dict(os.environ, {"XDG_CACHE_HOME": ""}):
+                self.assertEqual(status.default_state_dir(), Path.home() / ".cache" / "claude-busy-bar")
+        with mock.patch.object(status, "IS_WINDOWS", False), mock.patch.object(status.sys, "platform", "darwin"):
+            self.assertEqual(status.default_state_dir(), Path.home() / "Library" / "Caches" / "claude-busy-bar")
+
+    def test_hook_input_is_read_as_utf8(self):
+        class Stdin:
+            buffer = io.BytesIO(json.dumps({"hook_event_name": "Stop", "error_details": "café →"}).encode("utf-8"))
+
+        with mock.patch.object(status.sys, "stdin", Stdin()), mock.patch.object(
+            status, "handle_hook", return_value=0
+        ) as handle:
+            self.assertEqual(status.main(["hook"]), 0)
+        self.assertEqual(handle.call_args[0][1]["error_details"], "café →")
+
     def test_stale_sessions_are_reaped(self):
         short = dataclasses.replace(self.config, stale_seconds=10)
         store = status.Store(short)
