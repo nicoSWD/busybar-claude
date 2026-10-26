@@ -224,6 +224,65 @@ class StatusTests(unittest.TestCase):
         self.assertEqual(self.apply("SessionEnd", session="working", now=103), "WAITING_FOR_INPUT")
         self.assertEqual(self.apply("SessionEnd", session="waiting", now=104), "IDLE")
 
+    def shown(self):
+        """(focus, activity, mode) the bar would show for the current aggregate."""
+        with self.store.lock():
+            data = self.store.load_unlocked()
+        state = status.aggregate_state(data["sessions"])
+        focus = data["focus"]
+        return (
+            focus,
+            status.aggregate_activity(data["sessions"], state, focus, now=self.now),
+            status.aggregate_mode(data["sessions"], state, focus, now=self.now),
+        )
+
+    def test_same_state_sessions_do_not_take_turns_on_the_bar(self):
+        self.now = 101
+        self.apply("PreToolUse", session="a", now=100, tool_name="Edit", permission_mode="plan")
+        self.apply("PreToolUse", session="b", now=100.1, tool_name="Bash", permission_mode="bypassPermissions")
+        shown = self.shown()
+        self.assertEqual(shown[0], "a")  # the first session in the state keeps the bar
+        self.assertEqual(shown[2], "plan")
+        self.apply("PreToolUse", session="b", now=100.2, tool_name="Bash", permission_mode="bypassPermissions")
+        self.apply("PreToolUse", session="a", now=100.3, tool_name="Edit", permission_mode="plan")
+        self.apply("PreToolUse", session="b", now=100.4, tool_name="Bash", permission_mode="bypassPermissions")
+        self.assertEqual(self.shown(), shown)  # no flipping to b, subtitle and badge stay a's
+
+    def test_focus_moves_when_the_focused_session_goes_quiet(self):
+        self.apply("PreToolUse", session="a", now=100, tool_name="Edit")
+        self.apply("PreToolUse", session="b", now=101, tool_name="Bash")
+        self.now = 102
+        self.assertEqual(self.shown()[0], "a")
+        self.apply("PreToolUse", session="b", now=115, tool_name="Bash")
+        self.now = 115
+        self.assertEqual(self.shown()[0], "a")  # a quiet for 15s: still within the limit
+        late = 100 + status.FOCUS_STALE_SECONDS + 5
+        self.apply("PreToolUse", session="b", now=late, tool_name="Bash")
+        self.now = late
+        self.assertEqual(self.shown()[0], "b")
+
+    def test_focus_follows_session_end_and_priority(self):
+        self.apply("PreToolUse", session="a", now=100, tool_name="Edit")
+        self.apply("PreToolUse", session="b", now=101, tool_name="Bash")
+        self.now = 102
+        self.assertEqual(self.shown()[0], "a")
+        self.apply("SessionEnd", session="a", now=102)
+        self.assertEqual(self.shown()[0], "b")
+        self.apply("PreToolUse", session="a", now=103, tool_name="Edit")
+        self.now = 103
+        self.assertEqual(self.shown()[0], "b")  # a is back, but b keeps the bar
+        self.apply("Stop", session="b", now=104)  # b FINISHED, a still WORKING
+        self.now = 104
+        self.assertEqual(self.shown()[0], "a")
+        self.apply("PermissionRequest", session="c", now=105)
+        self.apply("SessionEnd", session="a", now=106)  # c WAITING outranks b FINISHED
+        self.now = 106
+        self.assertEqual(self.shown()[0], "c")
+        self.apply("SessionEnd", session="c", now=107)
+        self.apply("SessionEnd", session="b", now=108)
+        self.now = 108
+        self.assertEqual(self.shown()[0], None)
+
     def test_stale_sessions_are_reaped(self):
         short = dataclasses.replace(self.config, stale_seconds=10)
         store = status.Store(short)

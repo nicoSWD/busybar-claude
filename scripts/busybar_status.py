@@ -174,6 +174,7 @@ LAYOUT_VERSION = 12  # bump to force a redraw after changing the layout above
 SOUND_ID = "sound"  # key for the sound asset in an asset plan (not a display element)
 SOUND_STATES = {"WAITING_FOR_INPUT": "waiting", "FINISHED": "finished"}  # state -> sound kind
 SOUND_COOLDOWN = 3.0  # seconds between sounds
+FOCUS_STALE_SECONDS = 20.0  # a focused session quiet for this long hands the bar to a fresher one
 DEMO_SUBTITLES = {
     "WORKING": "Editing",
     "WAITING_FOR_INPUT": "Allow Bash?",
@@ -326,10 +327,11 @@ class Store:
             if isinstance(data, dict) and isinstance(data.get("sessions", {}), dict):
                 data.setdefault("sessions", {})
                 data.setdefault("last_sent", None)
+                data.setdefault("focus", None)
                 return data
         except (OSError, ValueError, TypeError):
             pass
-        return {"version": 1, "sessions": {}, "last_sent": None}
+        return {"version": 1, "sessions": {}, "last_sent": None, "focus": None}
 
     def save_unlocked(self, data: Mapping[str, Any]) -> None:
         self.ensure()
@@ -483,32 +485,57 @@ def aggregate_state(sessions: Mapping[str, Mapping[str, Any]]) -> str:
     return max((str(item.get("state", "IDLE")) for item in sessions.values()), key=lambda state: STATE_PRIORITY.get(state, -1))
 
 
-def aggregate_activity(sessions: Mapping[str, Mapping[str, Any]], state: str) -> str:
-    if state not in SUBTITLE_STATES:
-        return ""
-    candidates = [item for item in sessions.values() if item.get("state") == state]
-    if not candidates:
-        return ""
-    latest = max(candidates, key=lambda item: float(item.get("updated_at", 0)))
-    return str(latest.get("activity", ""))
+def focus_session(
+    sessions: Mapping[str, Mapping[str, Any]],
+    state: str,
+    focus: Optional[str] = None,
+    now: Optional[float] = None,
+) -> Optional[str]:
+    """The one session whose details (subtitle, mode, turn time) the bar shows for `state`.
 
-
-def aggregate_mode(sessions: Mapping[str, Mapping[str, Any]], state: str) -> str:
-    """Permission mode of the session that decides what the bar shows ("" for default or unknown)."""
-    candidates = [item for item in sessions.values() if item.get("state") == state]
-    if not candidates:
-        return ""
-    latest = max(candidates, key=lambda item: float(item.get("updated_at", 0)))
-    return str(latest.get("mode", ""))
-
-
-def aggregate_turn_seconds(sessions: Mapping[str, Mapping[str, Any]], state: str) -> Optional[float]:
-    """How long the finished turn took, for the session that decides what the bar shows."""
-    candidates = [item for item in sessions.values() if item.get("state") == state]
+    Sticks to `focus` while it is still in `state` and recently active, so several sessions in the same
+    state do not take turns on the screen. Otherwise the most recently updated session in `state` wins.
+    """
+    candidates = {session_id: item for session_id, item in sessions.items() if item.get("state") == state}
     if not candidates:
         return None
-    latest = max(candidates, key=lambda item: float(item.get("updated_at", 0)))
-    value = latest.get("turn_seconds")
+    now = time.time() if now is None else now
+    kept = candidates.get(focus) if focus is not None else None
+    if kept is not None and now - float(kept.get("updated_at", 0)) < FOCUS_STALE_SECONDS:
+        return focus
+    return max(candidates, key=lambda session_id: float(candidates[session_id].get("updated_at", 0)))
+
+
+def _focused_item(
+    sessions: Mapping[str, Mapping[str, Any]], state: str, focus: Optional[str], now: Optional[float]
+) -> Optional[Mapping[str, Any]]:
+    session_id = focus_session(sessions, state, focus, now)
+    return sessions[session_id] if session_id is not None else None
+
+
+def aggregate_activity(
+    sessions: Mapping[str, Mapping[str, Any]], state: str, focus: Optional[str] = None, now: Optional[float] = None
+) -> str:
+    if state not in SUBTITLE_STATES:
+        return ""
+    item = _focused_item(sessions, state, focus, now)
+    return str(item.get("activity", "")) if item is not None else ""
+
+
+def aggregate_mode(
+    sessions: Mapping[str, Mapping[str, Any]], state: str, focus: Optional[str] = None, now: Optional[float] = None
+) -> str:
+    """Permission mode of the session that decides what the bar shows ("" for default or unknown)."""
+    item = _focused_item(sessions, state, focus, now)
+    return str(item.get("mode", "")) if item is not None else ""
+
+
+def aggregate_turn_seconds(
+    sessions: Mapping[str, Mapping[str, Any]], state: str, focus: Optional[str] = None, now: Optional[float] = None
+) -> Optional[float]:
+    """How long the finished turn took, for the session that decides what the bar shows."""
+    item = _focused_item(sessions, state, focus, now)
+    value = item.get("turn_seconds") if item is not None else None
     return float(value) if value is not None else None
 
 
@@ -520,8 +547,9 @@ def apply_event(store: Store, payload: Mapping[str, Any], now: Optional[float] =
         data = store.load_unlocked()
         store.prune_unlocked(data, now)
         previous = aggregate_state(data["sessions"])
-        previous_activity = aggregate_activity(data["sessions"], previous)
-        previous_mode = aggregate_mode(data["sessions"], previous)
+        focus = data.get("focus")
+        previous_activity = aggregate_activity(data["sessions"], previous, focus, now)
+        previous_mode = aggregate_mode(data["sessions"], previous, focus, now)
         if event == "SessionEnd":
             data["sessions"].pop(session_id, None)
         else:
@@ -581,8 +609,9 @@ def apply_event(store: Store, payload: Mapping[str, Any], now: Optional[float] =
             if event in REDRAW_EVENTS:
                 data["drawn"] = None
         current = aggregate_state(data["sessions"])
-        current_activity = aggregate_activity(data["sessions"], current)
-        current_mode = aggregate_mode(data["sessions"], current)
+        data["focus"] = focus_session(data["sessions"], current, focus, now)
+        current_activity = aggregate_activity(data["sessions"], current, data["focus"], now)
+        current_mode = aggregate_mode(data["sessions"], current, data["focus"], now)
         needs_dispatch = (
             current != previous
             or current_activity != previous_activity
@@ -1044,9 +1073,10 @@ def dispatch(config: Config, force: bool = False, delay: float = 0.04) -> bool:
             data = store.load_unlocked()
             store.prune_unlocked(data, time.time())
             status = aggregate_state(data["sessions"])
-            activity = aggregate_activity(data["sessions"], status)
-            mode = aggregate_mode(data["sessions"], status)
-            turn_seconds = aggregate_turn_seconds(data["sessions"], status)
+            focus = data.get("focus")
+            activity = aggregate_activity(data["sessions"], status, focus)
+            mode = aggregate_mode(data["sessions"], status, focus)
+            turn_seconds = aggregate_turn_seconds(data["sessions"], status, focus)
             previous_status = data.get("last_status")
             last_sound_at = float(data.get("last_sound_at", 0))
             fingerprint = render_fingerprint(config, status, activity, mode)
@@ -1072,8 +1102,9 @@ def dispatch(config: Config, force: bool = False, delay: float = 0.04) -> bool:
             latest["drawn"] = drawn
             latest["last_status"] = status
             latest_status = aggregate_state(latest["sessions"])
-            latest_activity = aggregate_activity(latest["sessions"], latest_status)
-            latest_mode = aggregate_mode(latest["sessions"], latest_status)
+            latest_focus = latest.get("focus")
+            latest_activity = aggregate_activity(latest["sessions"], latest_status, latest_focus)
+            latest_mode = aggregate_mode(latest["sessions"], latest_status, latest_focus)
             if render_fingerprint(config, latest_status, latest_activity, latest_mode) == fingerprint:
                 latest["last_sent"] = fingerprint
             store.save_unlocked(latest)
