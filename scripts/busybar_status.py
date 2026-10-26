@@ -55,7 +55,7 @@ NOTIFICATION_STATES = {
 DEFAULT_LABELS = {
     "WORKING": "WORKING",
     "WAITING_FOR_INPUT": "WAITING",
-    "LIMIT": "LIMIT",
+    "LIMIT": "LIMIT HIT",
     "FINISHED": "FINISHED",
     "ERROR": "ERROR",
     "READY": "READY",
@@ -87,6 +87,23 @@ TOOL_ACTIVITY = {
 }
 THINKING_EVENTS = {"UserPromptSubmit", "PermissionDenied", "ElicitationResult", "PostCompact"}
 RATE_LIMIT_ERRORS = {"rate_limit"}
+# States whose subtitle says more: what Claude is doing, what it waits for, which limit it hit.
+SUBTITLE_STATES = ("WORKING", "WAITING_FOR_INPUT", "LIMIT")
+SUBTITLE_MAX_WIDTH = 40  # px; wider text no longer centers on the display beside the mascot
+INTERACTIVE_SUBTITLES = {"AskUserQuestion": "Question", "ExitPlanMode": "Plan ready"}
+NOTIFICATION_SUBTITLES = {
+    "permission_prompt": "Approve?",
+    "idle_prompt": "Your turn",
+    "elicitation_dialog": "MCP input",
+    "elicitation_url_dialog": "MCP input",
+    "agent_needs_input": "Needs you",
+    "quota_auto_resume_stale": "Press Enter",
+    "quota_auto_resume_disabled": "Your turn",
+}
+RESET_CLOCK = re.compile(r"reset[s]?\s+(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*([ap])\.?m", re.IGNORECASE)
+RESET_IN = re.compile(
+    r"\bin\s+(?:(\d+)\s*(?:h|hr|hrs|hours?))?\s*(?:(\d+)\s*(?:m|mins?|minutes?))?\b", re.IGNORECASE
+)
 # Events after which the device may no longer show what we last drew (new turn or session).
 REDRAW_EVENTS = {"SessionStart", "UserPromptSubmit"}
 
@@ -111,7 +128,7 @@ SUBTITLE_Y = 7
 SUBTITLE_COLOR = "#FFFFFFFF"
 ANIMATION_ID = "claude-anim"
 ANIMATION_Y = 14
-COMET_WIDTH = 32  # as wide as the title "WORKING", centered under the text: leaves the corner for the badge
+COMET_WIDTH = 32  # the rail under the text (comet while working, ripple while waiting): as wide as "WORKING", leaves the corner for the badge
 COMET_X = (72 - COMET_WIDTH) // 2
 MODE_ID = "claude-mode"
 BADGE_Y = 11  # `tiny` caps sit one row below y: rows 12-15, flush with the bottom edge
@@ -131,7 +148,7 @@ MASCOT_ID = "claude-mascot"
 MASCOT_WIDTH = busybar_mascot.SIZE
 DISPLAY_WIDTH = 72
 MANAGED_IDS = (TITLE_ID, SUBTITLE_ID, MASCOT_ID, ANIMATION_ID, DOTS_ID, MODE_ID)
-LAYOUT_VERSION = 8  # bump to force a redraw after changing the layout above
+LAYOUT_VERSION = 9  # bump to force a redraw after changing the layout above
 ASSET_RETRY_SECONDS = 60.0
 ASSET_UPLOAD_TIMEOUT = 15.0
 
@@ -350,6 +367,51 @@ def event_activity(payload: Mapping[str, Any]) -> Optional[str]:
     return None
 
 
+def _fits(text: str) -> bool:
+    return busybar_font.text_width(text, SUBTITLE_FONT) <= SUBTITLE_MAX_WIDTH
+
+
+def permission_subtitle(tool: str) -> str:
+    if tool in INTERACTIVE_SUBTITLES:
+        return INTERACTIVE_SUBTITLES[tool]
+    if tool and not tool.startswith("mcp__"):
+        text = "Allow %s?" % tool
+        if _fits(safe_label(text, "")):
+            return text
+    return "Allow tool?" if tool.startswith("mcp__") else "Approve?"
+
+
+def waiting_subtitle(payload: Mapping[str, Any]) -> Optional[str]:
+    """What Claude is waiting for, or None when the event says nothing specific."""
+    event = payload.get("hook_event_name")
+    tool = str(payload.get("tool_name", ""))
+    if event == "PermissionRequest":
+        return permission_subtitle(tool)
+    if event == "PreToolUse" and tool in INTERACTIVE_SUBTITLES:
+        return INTERACTIVE_SUBTITLES[tool]
+    if event == "Elicitation":
+        return "MCP input"
+    if event == "Notification":
+        return NOTIFICATION_SUBTITLES.get(str(payload.get("notification_type", "")))
+    return None
+
+
+def limit_subtitle(payload: Mapping[str, Any]) -> str:
+    """When the limit resets if the error says so ("Resets 3pm", "Back in 2h"), else the plain cause."""
+    text = " ".join(str(payload.get(key, "")) for key in ("last_assistant_message", "error_details"))
+    clock = RESET_CLOCK.search(text)
+    if clock:
+        hour, minute, half = int(clock.group(1)), clock.group(2), clock.group(3).lower()
+        if 1 <= hour <= 12 and (minute is None or int(minute) < 60):
+            when = "%d%s" % (hour, ":" + minute if minute and minute != "00" else "")
+            return "Resets %s%sm" % (when, half)
+    relative = RESET_IN.search(text)
+    if relative and (relative.group(1) or relative.group(2)):
+        hours, minutes = relative.group(1), relative.group(2)
+        return "Back in " + (hours + "h" if hours else "") + (minutes + "m" if minutes else "")
+    return "Rate limit"
+
+
 def aggregate_state(sessions: Mapping[str, Mapping[str, Any]]) -> str:
     if not sessions:
         return "IDLE"
@@ -357,12 +419,12 @@ def aggregate_state(sessions: Mapping[str, Mapping[str, Any]]) -> str:
 
 
 def aggregate_activity(sessions: Mapping[str, Mapping[str, Any]], state: str) -> str:
-    if state != "WORKING":
+    if state not in SUBTITLE_STATES:
         return ""
-    working = [item for item in sessions.values() if item.get("state") == "WORKING"]
-    if not working:
+    candidates = [item for item in sessions.values() if item.get("state") == state]
+    if not candidates:
         return ""
-    latest = max(working, key=lambda item: float(item.get("updated_at", 0)))
+    latest = max(candidates, key=lambda item: float(item.get("updated_at", 0)))
     return str(latest.get("activity", ""))
 
 
@@ -415,6 +477,12 @@ def apply_event(store: Store, payload: Mapping[str, Any], now: Optional[float] =
                 if activity is None:
                     activity = str(old.get("activity", "")) if old.get("state") == "WORKING" else ""
                 record["activity"] = activity or "Thinking"
+            elif state in ("WAITING_FOR_INPUT", "LIMIT"):
+                detail = limit_subtitle(payload) if state == "LIMIT" else waiting_subtitle(payload)
+                if event == "Notification" and old.get("state") == state and old.get("activity"):
+                    detail = str(old["activity"])  # a permission prompt right after PermissionRequest: keep the specific one
+                if detail:
+                    record["activity"] = detail
             data["sessions"][session_id] = record
             if event in REDRAW_EVENTS:
                 data["drawn"] = None
@@ -729,6 +797,12 @@ def asset_plan(config: Config, status: str) -> Dict[str, Tuple[str, Callable[[],
     if status == "WAITING_FOR_INPUT" and config.waiting_dots:
         dots_color = config.colors[status]
         plan[DOTS_ID] = (busybar_anim.dots_asset_name(dots_color), lambda: busybar_anim.dots_animation(dots_color))
+    if status == "WAITING_FOR_INPUT" and config.animation:
+        ping_color = config.colors[status]
+        plan[ANIMATION_ID] = (
+            busybar_anim.ping_asset_name(ping_color, COMET_WIDTH),
+            lambda: busybar_anim.ping_animation(ping_color, COMET_WIDTH),
+        )
     if status == "WORKING" and config.animation:
         color = config.colors["WORKING"]
         plan[ANIMATION_ID] = (

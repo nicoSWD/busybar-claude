@@ -306,7 +306,7 @@ class StatusTests(unittest.TestCase):
         self.apply("PreToolUse", now=105, tool_name="Mystery")
         self.assertEqual(activity(), "Working")
         self.apply("PermissionRequest", now=106)
-        self.assertEqual(activity(), "")
+        self.assertEqual(activity(), "Approve?", "waiting says what it waits for")
         self.apply("PostToolUse", now=107)
         self.assertEqual(activity(), "Thinking")
         self.apply("Stop", now=108)
@@ -392,7 +392,7 @@ class StatusTests(unittest.TestCase):
             ("PostToolUse", {}, "WORKING", "WORKING"),
             ("Stop", {}, "FINISHED", "FINISHED"),
             ("StopFailure", {"error": "server_error"}, "ERROR", "ERROR"),
-            ("StopFailure", {"error": "rate_limit"}, "LIMIT", "LIMIT"),
+            ("StopFailure", {"error": "rate_limit"}, "LIMIT", "LIMIT HIT"),
             ("SessionStart", {"source": "startup"}, "READY", "READY"),
             ("SessionEnd", {}, "IDLE", "IDLE"),
         ]:
@@ -400,7 +400,10 @@ class StatusTests(unittest.TestCase):
             self.assertEqual(device.screen[status.MASCOT_ID]["path"], mascot.asset_name(expected))
             self.assertEqual(device.screen[status.TITLE_ID]["text"], label)
             if expected == "WAITING_FOR_INPUT":
-                self.assertEqual(set(device.screen), {status.TITLE_ID, status.MASCOT_ID, status.DOTS_ID}, expected)
+                self.assertEqual(set(device.screen), {status.TITLE_ID, status.SUBTITLE_ID, status.MASCOT_ID,
+                                                      status.DOTS_ID, status.ANIMATION_ID}, expected)
+            elif expected == "LIMIT":
+                self.assertEqual(set(device.screen), {status.TITLE_ID, status.SUBTITLE_ID, status.MASCOT_ID}, expected)
             elif expected != "WORKING":
                 self.assertEqual(set(device.screen), {status.TITLE_ID, status.MASCOT_ID}, expected)
 
@@ -547,6 +550,79 @@ class StatusTests(unittest.TestCase):
         self.assertEqual(device.screen[status.MODE_ID]["text"], "PLAN")
         self.assertEqual(device.screen[status.TITLE_ID]["text"], "FINISHED")
 
+    def test_waiting_says_what_it_waits_for(self):
+        for payload, expected in [
+            ({"hook_event_name": "PermissionRequest", "tool_name": "Bash"}, "Allow Bash?"),
+            ({"hook_event_name": "PermissionRequest", "tool_name": "Edit"}, "Allow Edit?"),
+            ({"hook_event_name": "PermissionRequest", "tool_name": "WebFetch"}, "Approve?"),  # too wide to center
+            ({"hook_event_name": "PermissionRequest", "tool_name": "mcp__srv__tool"}, "Allow tool?"),
+            ({"hook_event_name": "PermissionRequest"}, "Approve?"),
+            ({"hook_event_name": "PermissionRequest", "tool_name": "ExitPlanMode"}, "Plan ready"),
+            ({"hook_event_name": "PreToolUse", "tool_name": "AskUserQuestion"}, "Question"),
+            ({"hook_event_name": "Elicitation"}, "MCP input"),
+            ({"hook_event_name": "Notification", "notification_type": "idle_prompt"}, "Your turn"),
+            ({"hook_event_name": "Notification", "notification_type": "quota_auto_resume_stale"}, "Press Enter"),
+        ]:
+            self.assertEqual(status.waiting_subtitle(payload), expected, payload)
+            self.assertLessEqual(font.text_width(expected, "tiny"), status.SUBTITLE_MAX_WIDTH, expected)
+
+    def test_a_permission_notification_keeps_the_specific_subtitle(self):
+        def activity():
+            with self.store.lock():
+                sessions = self.store.load_unlocked()["sessions"]
+            return status.aggregate_activity(sessions, status.aggregate_state(sessions))
+
+        self.apply("UserPromptSubmit")
+        self.apply("PermissionRequest", now=101, tool_name="Bash")
+        self.assertEqual(activity(), "Allow Bash?")
+        self.apply("Notification", now=102, notification_type="permission_prompt")
+        self.assertEqual(activity(), "Allow Bash?")
+        self.apply("PostToolUse", now=103)
+        self.apply("Stop", now=104)
+        self.apply("Notification", now=105, notification_type="idle_prompt")
+        self.assertEqual(activity(), "Your turn")
+
+    def test_limit_says_when_it_resets_if_the_error_does(self):
+        for message, expected in [
+            ("API Error: Rate limit reached", "Rate limit"),
+            ("5-hour limit reached - resets 3pm", "Resets 3pm"),
+            ("Usage limit reached. Your limit will reset at 3:30 PM", "Resets 3:30pm"),
+            ("resets at 12:00 am", "Resets 12am"),
+            ("Rate limited, try again in 2 hours 15 minutes", "Back in 2h15m"),
+            ("retry in 45 minutes", "Back in 45m"),
+            ("resets at 25pm", "Rate limit"),
+            ("", "Rate limit"),
+        ]:
+            self.assertEqual(status.limit_subtitle({"last_assistant_message": message}), expected, message)
+        self.assertEqual(status.limit_subtitle({"error_details": "429 Too Many Requests"}), "Rate limit")
+        self.apply("UserPromptSubmit")
+        self.apply("StopFailure", now=101, error="rate_limit", last_assistant_message="limit reached, resets 9am")
+        with self.store.lock():
+            sessions = self.store.load_unlocked()["sessions"]
+        self.assertEqual(status.aggregate_activity(sessions, "LIMIT"), "Resets 9am")
+        self.assertEqual(status.DEFAULT_LABELS["LIMIT"], "LIMIT HIT")
+        self.assertLessEqual(font.text_width("LIMIT HIT"), 40)
+
+    def test_waiting_gets_a_pulse_under_the_text_that_working_swaps_for_the_comet(self):
+        waiting = status.asset_plan(self.config, "WAITING_FOR_INPUT")
+        self.assertEqual(waiting[status.ANIMATION_ID][0],
+                         anim.ping_asset_name(self.config.colors["WAITING_FOR_INPUT"], status.COMET_WIDTH))
+        working = status.asset_plan(self.config, "WORKING")
+        self.assertNotEqual(working[status.ANIMATION_ID][0], waiting[status.ANIMATION_ID][0])
+        for state in ("LIMIT", "FINISHED", "ERROR", "READY", "IDLE"):
+            self.assertNotIn(status.ANIMATION_ID, status.asset_plan(self.config, state), state)
+        off = dataclasses.replace(self.config, animation=False)
+        self.assertNotIn(status.ANIMATION_ID, status.asset_plan(off, "WAITING_FOR_INPUT"))
+        device = FakeDevice()
+        self.drive(device, [("UserPromptSubmit", {}), ("PermissionRequest", {"tool_name": "Bash"})])
+        self.assertEqual(device.screen[status.ANIMATION_ID]["path"], waiting[status.ANIMATION_ID][0])
+        self.assertEqual(device.screen[status.SUBTITLE_ID]["text"], "Allow Bash?")
+        title = device.screen[status.TITLE_ID]
+        self.assertEqual(device.screen[status.DOTS_ID]["y"], title["y"] + 6, "dots stay on the baseline when the title moves up")
+        self.drive(device, [("PostToolUse", {})])
+        self.assertEqual(device.screen[status.ANIMATION_ID]["path"], working[status.ANIMATION_ID][0])
+        self.assertNotIn(status.DOTS_ID, device.screen)
+
     def test_waiting_dots_follow_the_label_and_are_centered_with_it(self):
         client = status.BusyBarClient(self.config)
         dots_name = anim.dots_asset_name(self.config.colors["WAITING_FOR_INPUT"])
@@ -578,7 +654,7 @@ class StatusTests(unittest.TestCase):
         self.assertNotIn(status.DOTS_ID, status.asset_plan(off, "WAITING_FOR_INPUT"))
         device = FakeDevice()
         self.drive(device, [("PermissionRequest", {})], config=off)
-        self.assertEqual(set(device.screen), {status.TITLE_ID, status.MASCOT_ID})
+        self.assertEqual(set(device.screen), {status.TITLE_ID, status.SUBTITLE_ID, status.MASCOT_ID, status.ANIMATION_ID})
 
     def test_waiting_to_working_removes_the_dots_and_back_again(self):
         device = FakeDevice()
@@ -714,6 +790,19 @@ class FontTests(unittest.TestCase):
 
 
 class AnimationTests(unittest.TestCase):
+    def test_ping_is_a_loop_of_rings_spreading_from_the_middle(self):
+        frames = anim.ping_frames((255, 176, 0), 32)
+        self.assertEqual(len(frames), anim.PING_FRAMES)
+        self.assertEqual({len(frame) for frame in frames}, {32 * 2 * 3})
+        row = lambda frame: [frame[i + 2] for i in range(0, 32 * 3, 3)]  # red channel of the bright row... 
+        bright = lambda frame: [frame[32 * 3 + i + 2] for i in range(0, 32 * 3, 3)]
+        early, late = bright(frames[1]), bright(frames[10])
+        self.assertLess(abs(early.index(max(early)) - 15.5), 4, "a fresh ring starts at the middle")
+        self.assertGreater(abs(late.index(max(late[:16])) - 15.5), abs(early.index(max(early[:16])) - 15.5), "and spreads out")
+        blob = anim.ping_animation("#FFB000FF", 32)
+        self.assertEqual(blob[9:11], bytes([32, 2]))
+        self.assertNotEqual(anim.ping_asset_name("#FFB000FF", 32), anim.animation_asset_name("#FFB000FF", 32))
+
     def test_dots_animation_counts_up_and_loops(self):
         blob = anim.dots_animation("#FFB000FF")
         self.assertEqual(blob[9:11], bytes([5, 1]))

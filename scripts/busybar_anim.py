@@ -195,3 +195,48 @@ def dots_asset_name(color: str) -> str:
 def dots_animation(color: str) -> bytes:
     """A 5x1 animation of dots appearing one by one, to follow a label as "WAITING...". """
     return encode_anim(DOTS_WIDTH, 1, DOTS_FPS, dots_frames(color))
+
+
+PING_FRAMES = 30
+PING_FPS = 15  # a two second cycle
+
+
+def ping_frames(color: Rgb, width: int, height: int = ANIMATION_HEIGHT, frames: int = PING_FRAMES) -> List[bytes]:
+    """Ripples spreading from the middle of a dim rail, one new ring every half cycle.
+
+    Two rings are always in flight, each fading as it travels outward, so the pulse never
+    stops; the cycle is periodic, so the loop is seamless. Used while Claude waits for you.
+    """
+    center = (width - 1) / 2.0
+    out: List[bytes] = []
+    for frame in range(frames):
+        intensity = [0.0] * width
+        for ring in range(2):
+            progress = ((frame / frames) + ring * 0.5) % 1.0
+            radius = progress * (center + 3)
+            strength = (1.0 - progress) ** 0.8
+            for x in range(width):
+                value = math.exp(-((abs(x - center) - radius) ** 2) / (2 * 1.4 ** 2)) * strength
+                if value > intensity[x]:
+                    intensity[x] = value
+        rows = []
+        for index in range(height):
+            gain = ANIMATION_ROW_GAIN[min(index, len(ANIMATION_ROW_GAIN) - 1)]
+            row = bytearray()
+            for x in range(width):
+                level = (ANIMATION_RAIL + (1.0 - ANIMATION_RAIL) * intensity[x]) * gain
+                white = max(0.0, intensity[x] - 0.7) / 0.3 * 0.4 * gain
+                channels = [min(255, int(c * level + (255 - c * level) * white)) for c in color]
+                row += bytes([channels[2], channels[1], channels[0]])  # BGR
+            rows.append(bytes(row))
+        out.append(b"".join(rows))
+    return out
+
+
+def ping_asset_name(color: str, width: int) -> str:
+    material = "%d:%d:%d:%s" % (ANIMATION_VERSION, PING_FPS, width, color[1:7].upper())
+    return "ping-%s.anim" % hashlib.sha256(material.encode("ascii")).hexdigest()[:8]
+
+
+def ping_animation(color: str, width: int) -> bytes:
+    return encode_anim(width, ANIMATION_HEIGHT, PING_FPS, ping_frames(parse_rgb(color), width))

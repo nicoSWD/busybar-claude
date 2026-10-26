@@ -71,7 +71,7 @@
       "type": "string",
       "title": "LIMIT label",
       "description": "Text shown while Claude is held up by a usage or rate limit.",
-      "default": "LIMIT"
+      "default": "LIMIT HIT"
     },
     "FINISHED_LABEL": {
       "type": "string",
@@ -165,8 +165,8 @@
     },
     "WORKING_ANIMATION": {
       "type": "boolean",
-      "title": "Working animation",
-      "description": "Play a progress animation along the bottom of the display while Claude is working. Uploads one small asset to the bar.",
+      "title": "Bottom animation",
+      "description": "Animate the bottom of the display: a comet while Claude is working, a pulse while it waits for you. Uploads two small assets to the bar.",
       "default": true
     }
   }

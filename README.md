@@ -57,7 +57,7 @@ environment. This implementation uses those documented interfaces only.
 | `ElicitationResult`, permission denial, resume notifications | `WORKING` |
 | `PostToolUseFailure` | `WORKING` (a tool failure is not a terminal failure) |
 | `Stop` | `FINISHED` |
-| `StopFailure` with `error: rate_limit` | `LIMIT` (held up by a usage limit; Claude may resume on its own, which shows as `WORKING` again) |
+| `StopFailure` with `error: rate_limit` | `LIMIT` (held up by a usage limit, shown as `LIMIT HIT`; Claude may resume on its own, which shows as `WORKING` again) |
 | any other `StopFailure` | `ERROR` |
 | `SessionEnd` | session removed; `IDLE` if no others remain |
 
@@ -120,7 +120,7 @@ A pixel-art Claude (orange, blocky, eyes as cut-outs) reacts to the state:
 | --- | --- |
 | `WORKING` | sits behind a laptop typing, a glowing logo on the lid, ellipsis dots pulsing overhead |
 | `WAITING_FOR_INPUT` | glances left and right, taps a foot, amber `?` bobbing; the label reads `WAITING` followed by animated dots (`.`, `..`, `...`) |
-| `LIMIT` | worn out and sweating beside a running hourglass |
+| `LIMIT` | worn out and sweating beside a running hourglass; `LIMIT HIT` with the reset time underneath when the error gives one |
 | `FINISHED` | jumps twice in a shower of confetti, then waves with twinkling sparkles |
 | `ERROR` | dizzy X eyes, shakes, red `!`, a puff of smoke |
 | `READY` | waves hello, blinks, a `>_` prompt with a blinking cursor overhead |
@@ -132,16 +132,34 @@ afterwards. Set `MASCOT` to `false` to get the full-width text layout back.
 
 ### Subtitle and comet
 
-The subtitle says what Claude is doing, derived from the tool in `PreToolUse`:
-`Reading`, `Editing`, `Running`, `Searching`, `Browsing`, `Subagent`, `Tool`
-(MCP), `Compacting`, `Working` (anything else), or `Thinking` (after a prompt or session start
-and after a permission wait). `PostToolUse` keeps the previous subtitle. Every
-other state shows the label only.
+The subtitle gives the detail. While `WORKING` it says what Claude is doing, derived from the
+tool in `PreToolUse`: `Reading`, `Editing`, `Running`, `Searching`, `Browsing`, `Subagent`,
+`Tool` (MCP), `Compacting`, `Working` (anything else), or `Thinking` (after a prompt or
+session start and after a permission wait). `PostToolUse` keeps the previous subtitle.
+
+While `WAITING` it says what Claude is waiting for:
+
+| Event | Subtitle |
+| --- | --- |
+| permission prompt | `Allow Bash?`, `Allow Edit?`, ... (`Allow tool?` for MCP tools, `Approve?` when the tool name is too wide) |
+| `AskUserQuestion` | `Question` |
+| `ExitPlanMode` | `Plan ready` |
+| MCP elicitation | `MCP input` |
+| idle reminder, quota wait over | `Your turn` |
+| agent needs input | `Needs you` |
+| auto-resume stale | `Press Enter` |
+
+While `LIMIT HIT` it says when the limit lifts, if the error message includes it (`Resets 3pm`,
+`Resets 3:30pm`, `Back in 2h15m`), else `Rate limit`. The message format is not documented, so
+that parsing is best effort and always falls back to the plain cause. Other states show the
+label only. All subtitles are at most 40 px wide so they center like the title.
 
 The comet is a glowing head that eases back and forth along a dim 32 px rail, trail
 fading behind it, in the configured `WORKING` color
 (`scripts/busybar_anim.py`, which also holds a pure-Python encoder for the bar's
-`.anim` format). Set `WORKING_ANIMATION` to `false` to skip it.
+`.anim` format). While waiting, the same slot shows an amber ripple instead: rings spreading
+from the middle of the rail, a new one every second. Set `WORKING_ANIMATION` to `false` to skip
+both.
 
 Text is centered on the whole display. A label too wide to clear the mascot
 (over about 8 characters in the title font) is centered in the 56px column
@@ -170,6 +188,8 @@ comet is a fixed 32 px, centered under the text, so it ends before the badge beg
 are in `scripts/busybar_font.py`.
 
 ### Waiting dots
+
+![The bar while Claude waits for permission: WAITING with animated dots, "Allow Bash?" underneath, the mascot tapping its foot and an amber ripple along the bottom](docs/waiting.gif)
 
 While Claude waits for input the label is followed by three dots that appear one
 after another. Text cannot animate, so the dots are a tiny 5×1 looping animation
