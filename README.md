@@ -12,37 +12,6 @@ the mascot types behind a laptop, the subtitle names the tool Claude is using
 right now, and a comet sweeps the bottom edge. The other states are described
 under [Display layout](#display-layout).*
 
-**Contents**
-
-- [Install](#install)
-  - [Install with one command](#install-with-one-command)
-  - [Update and uninstall](#update-and-uninstall)
-- [Requirements](#requirements)
-- [Setup details](#setup-details)
-  - [Linux and Windows](#linux-and-windows)
-  - [Connect the BUSY Bar](#connect-the-busy-bar)
-  - [Point the plugin at the bar (LAN only)](#point-the-plugin-at-the-bar-lan-only)
-  - [Check that it works](#check-that-it-works)
-  - [Optional: plan usage on the READY screen](#optional-plan-usage-on-the-ready-screen)
-- [What the official APIs support](#what-the-official-apis-support)
-- [State behavior](#state-behavior)
-  - [Detection limits](#detection-limits)
-- [Display layout](#display-layout)
-  - [Mascot](#mascot)
-  - [Subtitle and comet](#subtitle-and-comet)
-  - [Celebration](#celebration)
-  - [Night scene](#night-scene)
-  - [Sounds](#sounds)
-  - [Permission-mode badge](#permission-mode-badge)
-  - [Waiting dots](#waiting-dots)
-  - [Regenerating the picture](#regenerating-the-picture)
-  - [How it is drawn](#how-it-is-drawn)
-- [Test the real connection](#test-the-real-connection)
-- [Automated tests](#automated-tests)
-- [Real-device validation procedure](#real-device-validation-procedure)
-- [Troubleshooting](#troubleshooting)
-- [References](#references)
-
 ![The bar while Claude waits for permission: WAITING with animated dots, "Allow Bash?" underneath, the mascot tapping its foot and an amber ripple along the bottom](docs/waiting.gif)
 
 ***WAITING**: Claude needs a permission or an answer. The subtitle says what
