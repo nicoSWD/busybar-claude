@@ -428,7 +428,7 @@ Send one state, optionally overriding its appearance:
 ./scripts/busybarctl --url 10.0.4.20 assets   # install the mascot and comet animations if missing
 ```
 
-`demo` sends `WORKING` (with subtitle), `WAITING_FOR_INPUT`, `LIMIT`, `FINISHED`,
+`demo` sends `WORKING`, `WAITING_FOR_INPUT` and `LIMIT` (each with a sample subtitle), `FINISHED`,
 `ERROR`, `READY`, and `IDLE`, holding each for five seconds so the mascot can be seen.
 The final state is neutral gray `IDLE`.
 

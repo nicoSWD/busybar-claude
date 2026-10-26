@@ -149,6 +149,7 @@ MASCOT_WIDTH = busybar_mascot.SIZE
 DISPLAY_WIDTH = 72
 MANAGED_IDS = (TITLE_ID, SUBTITLE_ID, MASCOT_ID, ANIMATION_ID, DOTS_ID, MODE_ID)
 LAYOUT_VERSION = 9  # bump to force a redraw after changing the layout above
+DEMO_SUBTITLES = {"WORKING": "Editing", "WAITING_FOR_INPUT": "Allow Bash?", "LIMIT": "Resets 3pm"}
 ASSET_RETRY_SECONDS = 60.0
 ASSET_UPLOAD_TIMEOUT = 15.0
 
@@ -1042,7 +1043,7 @@ def build_parser() -> argparse.ArgumentParser:
     send.add_argument("--color", help="one-off #RRGGBBAA text color")
     send.add_argument("--activity", default="", help="one-off subtitle under the status label")
     send.add_argument("--mode", default="", choices=[""] + list(MODE_BADGES), help="one-off permission-mode badge")
-    subparsers.add_parser("demo", help="send all five statuses in sequence")
+    subparsers.add_parser("demo", help="send every status in sequence")
     subparsers.add_parser("assets", help="install the mascot and WORKING animations on the device if missing")
     subparsers.add_parser("state", help="print the shared session state")
     subparsers.add_parser("_dispatch")
@@ -1093,7 +1094,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             client = BusyBarClient(config)
             for status in STATUSES:
                 assets = resolve_assets(config, None, client, asset_plan(config, status))
-                client.send(status, activity="Editing" if status == "WORKING" else "", assets=assets)
+                client.send(status, activity=DEMO_SUBTITLES.get(status, ""), assets=assets)
                 print("Sent " + status)
                 if status != STATUSES[-1]:
                     time.sleep(5)
