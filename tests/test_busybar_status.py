@@ -225,63 +225,68 @@ class StatusTests(unittest.TestCase):
         self.assertEqual(self.apply("SessionEnd", session="waiting", now=104), "IDLE")
 
     def shown(self):
-        """(focus, activity, mode) the bar would show for the current aggregate."""
+        """(session, state, activity, mode) the bar would show."""
         with self.store.lock():
-            data = self.store.load_unlocked()
-        state = status.aggregate_state(data["sessions"])
-        focus = data["focus"]
+            sessions = self.store.load_unlocked()["sessions"]
+        state = status.aggregate_state(sessions)
         return (
-            focus,
-            status.aggregate_activity(data["sessions"], state, focus, now=self.now),
-            status.aggregate_mode(data["sessions"], state, focus, now=self.now),
+            status.focus_session(sessions, state),
+            state,
+            status.aggregate_activity(sessions, state),
+            status.aggregate_mode(sessions, state),
         )
 
-    def test_same_state_sessions_do_not_take_turns_on_the_bar(self):
-        self.now = 101
-        self.apply("PreToolUse", session="a", now=100, tool_name="Edit", permission_mode="plan")
-        self.apply("PreToolUse", session="b", now=100.1, tool_name="Bash", permission_mode="bypassPermissions")
+    def test_tool_calls_never_move_the_bar_between_sessions(self):
+        self.apply("UserPromptSubmit", session="a", now=100, permission_mode="plan")
+        self.apply("UserPromptSubmit", session="b", now=101, permission_mode="bypassPermissions")
         shown = self.shown()
-        self.assertEqual(shown[0], "a")  # the first session in the state keeps the bar
-        self.assertEqual(shown[2], "plan")
-        self.apply("PreToolUse", session="b", now=100.2, tool_name="Bash", permission_mode="bypassPermissions")
-        self.apply("PreToolUse", session="a", now=100.3, tool_name="Edit", permission_mode="plan")
-        self.apply("PreToolUse", session="b", now=100.4, tool_name="Bash", permission_mode="bypassPermissions")
-        self.assertEqual(self.shown(), shown)  # no flipping to b, subtitle and badge stay a's
+        self.assertEqual((shown[0], shown[3]), ("b", "bypassPermissions"))  # spoke to b last
+        for now, session, tool in [(102, "a", "Edit"), (103, "b", "Bash"), (104, "a", "Edit"), (105, "a", "Read")]:
+            self.apply("PreToolUse", session=session, now=now, tool_name=tool)
+            self.apply("PostToolUse", session=session, now=now + 0.5, tool_name=tool)
+        self.assertEqual(self.shown()[:2], ("b", "WORKING"))  # a's busier tool traffic does not take the bar
 
-    def test_focus_moves_when_the_focused_session_goes_quiet(self):
-        self.apply("PreToolUse", session="a", now=100, tool_name="Edit")
-        self.apply("PreToolUse", session="b", now=101, tool_name="Bash")
-        self.now = 102
-        self.assertEqual(self.shown()[0], "a")
-        self.apply("PreToolUse", session="b", now=115, tool_name="Bash")
-        self.now = 115
-        self.assertEqual(self.shown()[0], "a")  # a quiet for 15s: still within the limit
-        late = 100 + status.FOCUS_STALE_SECONDS + 5
-        self.apply("PreToolUse", session="b", now=late, tool_name="Bash")
-        self.now = late
+    def test_prompting_a_session_pulls_the_bar_to_it(self):
+        self.apply("UserPromptSubmit", session="a", now=100)
+        self.apply("UserPromptSubmit", session="b", now=101)
         self.assertEqual(self.shown()[0], "b")
+        self.apply("UserPromptSubmit", session="a", now=110)
+        self.assertEqual(self.shown()[0], "a")
 
-    def test_focus_follows_session_end_and_priority(self):
-        self.apply("PreToolUse", session="a", now=100, tool_name="Edit")
-        self.apply("PreToolUse", session="b", now=101, tool_name="Bash")
-        self.now = 102
-        self.assertEqual(self.shown()[0], "a")
-        self.apply("SessionEnd", session="a", now=102)
-        self.assertEqual(self.shown()[0], "b")
-        self.apply("PreToolUse", session="a", now=103, tool_name="Edit")
-        self.now = 103
-        self.assertEqual(self.shown()[0], "b")  # a is back, but b keeps the bar
-        self.apply("Stop", session="b", now=104)  # b FINISHED, a still WORKING
-        self.now = 104
-        self.assertEqual(self.shown()[0], "a")
-        self.apply("PermissionRequest", session="c", now=105)
-        self.apply("SessionEnd", session="a", now=106)  # c WAITING outranks b FINISHED
-        self.now = 106
-        self.assertEqual(self.shown()[0], "c")
-        self.apply("SessionEnd", session="c", now=107)
-        self.apply("SessionEnd", session="b", now=108)
-        self.now = 108
-        self.assertEqual(self.shown()[0], None)
+    def test_a_session_that_asks_for_the_user_surfaces_over_background_work(self):
+        self.apply("UserPromptSubmit", session="a", now=100)
+        self.apply("UserPromptSubmit", session="b", now=101)
+        self.apply("PermissionRequest", session="a", now=102)
+        self.assertEqual(self.shown()[:2], ("a", "WAITING_FOR_INPUT"))
+        self.apply("Notification", session="a", now=103, notification_type="permission_prompt")
+        self.apply("UserPromptSubmit", session="b", now=104)
+        self.assertEqual(self.shown()[:2], ("b", "WORKING"), "the user went back to b")
+        self.apply("PostToolUse", session="a", now=105)  # approved in a: a works again, attention unchanged
+        self.assertEqual(self.shown()[:2], ("b", "WORKING"))
+
+    def test_background_session_finishing_does_not_hide_the_attended_one(self):
+        self.apply("UserPromptSubmit", session="a", now=100)
+        self.apply("UserPromptSubmit", session="b", now=101)
+        self.apply("Stop", session="a", now=102)
+        self.assertEqual(self.shown()[:2], ("b", "WORKING"))
+        self.apply("Stop", session="b", now=103)
+        self.assertEqual(self.shown()[1], "FINISHED")
+
+    def test_idle_sessions_fall_back_to_priority_and_then_recency(self):
+        self.apply("Stop", session="a", now=100)
+        self.apply("StopFailure", session="b", now=101, error="server_error")
+        self.assertEqual(self.shown()[:2], ("b", "ERROR"))
+        self.apply("SessionEnd", session="b", now=102)
+        self.assertEqual(self.shown()[:2], ("a", "FINISHED"))
+        self.apply("SessionEnd", session="a", now=103)
+        self.assertEqual(self.shown()[:2], (None, "IDLE"))
+
+    def test_records_from_before_attention_was_tracked_still_work(self):
+        sessions = {
+            "old": {"state": "WORKING", "updated_at": 100.0},
+            "new": {"state": "WORKING", "updated_at": 90.0, "attention_at": 95.0},
+        }
+        self.assertEqual(status.focus_session(sessions, "WORKING"), "old")  # attention_at falls back to updated_at
 
     def test_windows_lock_retries_until_free_and_unlocks(self):
         calls = []
@@ -637,7 +642,7 @@ class StatusTests(unittest.TestCase):
         self.apply("UserPromptSubmit", session="b", now=101, permission_mode="bypassPermissions")
         self.assertEqual(self.mode_of(), "bypassPermissions", "most recently active working session")
         self.apply("PermissionRequest", session="a", now=102, permission_mode="plan")
-        self.assertEqual(self.mode_of(), "bypassPermissions", "WORKING outranks WAITING")
+        self.assertEqual(self.mode_of(), "plan", "a just asked for the user, so it surfaces over b's work")
         self.apply("Stop", session="b", now=103, permission_mode="bypassPermissions")
         self.assertEqual(self.mode_of(), "plan", "WAITING outranks FINISHED, so session a decides")
 

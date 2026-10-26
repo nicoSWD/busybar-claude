@@ -179,7 +179,7 @@ LAYOUT_VERSION = 12  # bump to force a redraw after changing the layout above
 SOUND_ID = "sound"  # key for the sound asset in an asset plan (not a display element)
 SOUND_STATES = {"WAITING_FOR_INPUT": "waiting", "FINISHED": "finished"}  # state -> sound kind
 SOUND_COOLDOWN = 3.0  # seconds between sounds
-FOCUS_STALE_SECONDS = 20.0  # a focused session quiet for this long hands the bar to a fresher one
+ATTENTION_EVENTS = ("SessionStart", "UserPromptSubmit")  # the user opened or spoke to a session
 DEMO_SUBTITLES = {
     "WORKING": "Editing",
     "WAITING_FOR_INPUT": "Allow Bash?",
@@ -364,11 +364,10 @@ class Store:
             if isinstance(data, dict) and isinstance(data.get("sessions", {}), dict):
                 data.setdefault("sessions", {})
                 data.setdefault("last_sent", None)
-                data.setdefault("focus", None)
                 return data
         except (OSError, ValueError, TypeError):
             pass
-        return {"version": 1, "sessions": {}, "last_sent": None, "focus": None}
+        return {"version": 1, "sessions": {}, "last_sent": None}
 
     def save_unlocked(self, data: Mapping[str, Any]) -> None:
         self.ensure()
@@ -523,62 +522,59 @@ def finished_subtitle(seconds: float) -> str:
     return "Done in " + duration if _fits("Done in " + duration) else duration
 
 
+ACTIVE_STATES = ("WORKING", "WAITING_FOR_INPUT", "LIMIT")  # the session is mid-turn, so it can compete for attention
+
+
+def _attention(item: Mapping[str, Any]) -> Tuple[float, float]:
+    """When the user last cared about this session; records from before attention was tracked use updated_at."""
+    updated = float(item.get("updated_at", 0))
+    return float(item.get("attention_at", updated)), updated
+
+
 def aggregate_state(sessions: Mapping[str, Mapping[str, Any]]) -> str:
+    """The state the bar shows: that of the session the user attended most recently among those mid-turn.
+
+    Tool calls never move the bar between sessions; only a prompt, a question for the user, or a new
+    session does. When nothing is mid-turn, the highest-priority resting state wins.
+    """
     if not sessions:
         return "IDLE"
+    active = [item for item in sessions.values() if item.get("state") in ACTIVE_STATES]
+    if active:
+        return str(max(active, key=_attention).get("state"))
     return max((str(item.get("state", "IDLE")) for item in sessions.values()), key=lambda state: STATE_PRIORITY.get(state, -1))
 
 
-def focus_session(
-    sessions: Mapping[str, Mapping[str, Any]],
-    state: str,
-    focus: Optional[str] = None,
-    now: Optional[float] = None,
-) -> Optional[str]:
-    """The one session whose details (subtitle, mode, turn time) the bar shows for `state`.
-
-    Sticks to `focus` while it is still in `state` and recently active, so several sessions in the same
-    state do not take turns on the screen. Otherwise the most recently updated session in `state` wins.
-    """
+def focus_session(sessions: Mapping[str, Mapping[str, Any]], state: str) -> Optional[str]:
+    """The one session whose details (subtitle, mode, turn time) the bar shows for `state`."""
     candidates = {session_id: item for session_id, item in sessions.items() if item.get("state") == state}
     if not candidates:
         return None
-    now = time.time() if now is None else now
-    kept = candidates.get(focus) if focus is not None else None
-    if kept is not None and now - float(kept.get("updated_at", 0)) < FOCUS_STALE_SECONDS:
-        return focus
-    return max(candidates, key=lambda session_id: float(candidates[session_id].get("updated_at", 0)))
+    key = _attention if state in ACTIVE_STATES else (lambda item: float(item.get("updated_at", 0)))
+    return max(candidates, key=lambda session_id: key(candidates[session_id]))
 
 
-def _focused_item(
-    sessions: Mapping[str, Mapping[str, Any]], state: str, focus: Optional[str], now: Optional[float]
-) -> Optional[Mapping[str, Any]]:
-    session_id = focus_session(sessions, state, focus, now)
+def _focused_item(sessions: Mapping[str, Mapping[str, Any]], state: str) -> Optional[Mapping[str, Any]]:
+    session_id = focus_session(sessions, state)
     return sessions[session_id] if session_id is not None else None
 
 
-def aggregate_activity(
-    sessions: Mapping[str, Mapping[str, Any]], state: str, focus: Optional[str] = None, now: Optional[float] = None
-) -> str:
+def aggregate_activity(sessions: Mapping[str, Mapping[str, Any]], state: str) -> str:
     if state not in SUBTITLE_STATES:
         return ""
-    item = _focused_item(sessions, state, focus, now)
+    item = _focused_item(sessions, state)
     return str(item.get("activity", "")) if item is not None else ""
 
 
-def aggregate_mode(
-    sessions: Mapping[str, Mapping[str, Any]], state: str, focus: Optional[str] = None, now: Optional[float] = None
-) -> str:
+def aggregate_mode(sessions: Mapping[str, Mapping[str, Any]], state: str) -> str:
     """Permission mode of the session that decides what the bar shows ("" for default or unknown)."""
-    item = _focused_item(sessions, state, focus, now)
+    item = _focused_item(sessions, state)
     return str(item.get("mode", "")) if item is not None else ""
 
 
-def aggregate_turn_seconds(
-    sessions: Mapping[str, Mapping[str, Any]], state: str, focus: Optional[str] = None, now: Optional[float] = None
-) -> Optional[float]:
+def aggregate_turn_seconds(sessions: Mapping[str, Mapping[str, Any]], state: str) -> Optional[float]:
     """How long the finished turn took, for the session that decides what the bar shows."""
-    item = _focused_item(sessions, state, focus, now)
+    item = _focused_item(sessions, state)
     value = item.get("turn_seconds") if item is not None else None
     return float(value) if value is not None else None
 
@@ -591,9 +587,8 @@ def apply_event(store: Store, payload: Mapping[str, Any], now: Optional[float] =
         data = store.load_unlocked()
         store.prune_unlocked(data, now)
         previous = aggregate_state(data["sessions"])
-        focus = data.get("focus")
-        previous_activity = aggregate_activity(data["sessions"], previous, focus, now)
-        previous_mode = aggregate_mode(data["sessions"], previous, focus, now)
+        previous_activity = aggregate_activity(data["sessions"], previous)
+        previous_mode = aggregate_mode(data["sessions"], previous)
         if event == "SessionEnd":
             data["sessions"].pop(session_id, None)
         else:
@@ -610,6 +605,10 @@ def apply_event(store: Store, payload: Mapping[str, Any], now: Optional[float] =
                 )
                 return previous, needs_dispatch
             record = {"state": state, "updated_at": now, "event": event}
+            if event in ATTENTION_EVENTS or (state == "WAITING_FOR_INPUT" and old.get("state") != state):
+                record["attention_at"] = now  # the user spoke to this session, or it just started needing them
+            else:
+                record["attention_at"] = old.get("attention_at", old.get("updated_at", now))
             mode = payload.get("permission_mode")
             if isinstance(mode, str):  # not every event carries it; otherwise keep what we knew
                 record["mode"] = "" if mode == "default" else mode
@@ -653,9 +652,8 @@ def apply_event(store: Store, payload: Mapping[str, Any], now: Optional[float] =
             if event in REDRAW_EVENTS:
                 data["drawn"] = None
         current = aggregate_state(data["sessions"])
-        data["focus"] = focus_session(data["sessions"], current, focus, now)
-        current_activity = aggregate_activity(data["sessions"], current, data["focus"], now)
-        current_mode = aggregate_mode(data["sessions"], current, data["focus"], now)
+        current_activity = aggregate_activity(data["sessions"], current)
+        current_mode = aggregate_mode(data["sessions"], current)
         needs_dispatch = (
             current != previous
             or current_activity != previous_activity
@@ -1117,10 +1115,9 @@ def dispatch(config: Config, force: bool = False, delay: float = 0.04) -> bool:
             data = store.load_unlocked()
             store.prune_unlocked(data, time.time())
             status = aggregate_state(data["sessions"])
-            focus = data.get("focus")
-            activity = aggregate_activity(data["sessions"], status, focus)
-            mode = aggregate_mode(data["sessions"], status, focus)
-            turn_seconds = aggregate_turn_seconds(data["sessions"], status, focus)
+            activity = aggregate_activity(data["sessions"], status)
+            mode = aggregate_mode(data["sessions"], status)
+            turn_seconds = aggregate_turn_seconds(data["sessions"], status)
             previous_status = data.get("last_status")
             last_sound_at = float(data.get("last_sound_at", 0))
             fingerprint = render_fingerprint(config, status, activity, mode)
@@ -1146,9 +1143,8 @@ def dispatch(config: Config, force: bool = False, delay: float = 0.04) -> bool:
             latest["drawn"] = drawn
             latest["last_status"] = status
             latest_status = aggregate_state(latest["sessions"])
-            latest_focus = latest.get("focus")
-            latest_activity = aggregate_activity(latest["sessions"], latest_status, latest_focus)
-            latest_mode = aggregate_mode(latest["sessions"], latest_status, latest_focus)
+            latest_activity = aggregate_activity(latest["sessions"], latest_status)
+            latest_mode = aggregate_mode(latest["sessions"], latest_status)
             if render_fingerprint(config, latest_status, latest_activity, latest_mode) == fingerprint:
                 latest["last_sent"] = fingerprint
             store.save_unlocked(latest)

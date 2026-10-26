@@ -73,19 +73,28 @@ environment. This implementation uses those documented interfaces only.
 | `SessionEnd` | session removed; `IDLE` if no others remain |
 
 Multiple sessions share an atomically locked state file under
-`CLAUDE_PLUGIN_DATA`. The visible aggregate uses this precedence:
+`CLAUDE_PLUGIN_DATA`. The bar follows **attention**, not chatter. Among the
+sessions that are mid-turn (`WORKING`, `WAITING_FOR_INPUT`, `LIMIT`), the one you
+last attended to wins, and the bar shows that session's state, subtitle, mode
+badge and turn time together. A session earns attention when:
 
-`WORKING` → `WAITING_FOR_INPUT` → `LIMIT` → `ERROR` → `FINISHED` → `READY` → `IDLE`
+- you open it or submit a prompt (`SessionStart`, `UserPromptSubmit`), or
+- it starts needing you (it enters `WAITING_FOR_INPUT`).
 
-Consequently one active session keeps the bar blue even if another session is
-waiting or finished. When several sessions share the winning state, the subtitle,
-mode badge and turn time follow one "focused" session (the first to enter that
-state) until it has been quiet for 20 seconds, so the bar does not flip between
-instances. Identical aggregate states are not resent. Device I/O is
-performed in a detached process, so hook execution does not wait on the network.
-A single lightweight reaper removes sessions that have emitted no hook event
-for the configured stale timeout; this recovers from terminal crashes and
-unclean Claude Code exits.
+Tool calls never move the bar, so two busy sessions do not take turns on the
+screen. A background session that asks for permission surfaces over the one you
+were watching, and the bar returns to your session when you prompt it again.
+When a session finishes, whatever is still running surfaces.
+
+When no session is mid-turn, the highest-priority resting state wins:
+
+`ERROR` → `FINISHED` → `READY` → `IDLE`
+
+(the most recently updated session breaks ties). Identical states are not
+resent. Device I/O is performed in a detached process, so hook execution does
+not wait on the network. A single lightweight reaper removes sessions that have
+emitted no hook event for the configured stale timeout; this recovers from
+terminal crashes and unclean Claude Code exits.
 
 ### Detection limits
 
@@ -108,9 +117,9 @@ no hook. It never uses timers to guess.
   mode (a prompt or any tool call), so a change made while the session is idle shows up
   late. `SessionStart`, notifications, `StopFailure` and compaction events do not carry it;
   the last known mode is kept for those, and a new session shows no badge until its first prompt.
-- **Several sessions.** One bar shows the highest-priority state across all
-  open sessions (see the precedence above), so a busy session hides a finished
-  one.
+- **Several sessions.** One bar shows one session at a time (the one you
+  attended last, see above), so a background session that finishes while you
+  work in another does not show `FINISHED` or play its sound.
 - **Subagents and background work.** Their tool hooks arrive under the same
   session and move the subtitle, but there is no separate "background agent
   finished" state.
