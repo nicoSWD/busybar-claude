@@ -26,8 +26,18 @@ class MarketplaceTests(unittest.TestCase):
         self.assertEqual(len(self.marketplace["plugins"]), 1)
         entry = self.marketplace["plugins"][0]
         self.assertEqual(entry["name"], self.manifest["name"], "install id and manifest name must match")
-        self.assertEqual(entry["source"], "./", "the plugin is the repository root")
         self.assertTrue(self.marketplace["owner"]["name"])
+
+    def test_the_entry_is_either_local_or_pinned_to_a_release_tag(self):
+        entry = self.marketplace["plugins"][0]
+        if entry["source"] == "./":
+            return  # before the first release: the plugin is the repository root
+        source = entry["source"]
+        self.assertEqual(source["source"], "url")
+        self.assertEqual(source["url"], self.manifest["repository"] + ".git")
+        self.assertRegex(entry["version"], r"^\d+\.\d+\.\d+$")
+        self.assertEqual(source["ref"], "v" + entry["version"], "the tag matches the version")
+        self.assertRegex(source["sha"], r"^[0-9a-f]{40}$", "pinned to the exact commit")
 
     def test_names_follow_the_marketplace_rules(self):
         name = self.marketplace["name"]
@@ -35,10 +45,9 @@ class MarketplaceTests(unittest.TestCase):
         self.assertNotIn(name, {"claude-plugins-official", "anthropic-plugins"})
         self.assertFalse(re.match(r"^(claude|anthropic|cc-plugin)-", self.manifest["name"]), "reserved plugin prefix")
 
-    def test_version_comes_from_the_commit(self):
-        # With no version anywhere, every commit counts as an update. A pinned version would need a bump per release.
+    def test_the_version_lives_on_the_marketplace_entry_only(self):
+        # Two places would let plugin.json win silently; with a release tag the entry is the single source.
         self.assertNotIn("version", self.manifest)
-        self.assertNotIn("version", self.marketplace["plugins"][0])
         self.assertNotIn("version", self.marketplace)
 
     def test_entry_declares_no_components_that_could_conflict_with_the_manifest(self):

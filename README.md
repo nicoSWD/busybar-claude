@@ -91,6 +91,9 @@ claude plugin uninstall busy-claude@busybar-claude
 claude plugin marketplace remove busybar-claude    # optional
 ```
 
+New versions are published as [GitHub releases](https://github.com/nicoSWD/busybar-claude/releases), which
+also list what changed. Pushes to `main` do not reach users until a release is made.
+
 Plugins from third-party marketplaces are not updated automatically. To turn it
 on, open `/plugin`, go to **Marketplaces**, select `busybar-claude` and choose
 **Enable auto-update**.
@@ -674,6 +677,26 @@ The suite uses a local mock HTTP server and covers lifecycle transitions,
 interactive tools, non-terminal tool failures, API failures, disconnected
 devices, stale cleanup, authentication headers, redraw deduplication, and two
 simultaneous sessions.
+
+## Releasing
+
+Users get the version the marketplace entry in `.claude-plugin/marketplace.json` points at: a git
+tag, pinned by commit. `main` can hold unfinished work without reaching anyone. To release:
+
+```sh
+tools/release.py 1.2.0           # tests, tag v1.2.0, then a "Release 1.2.0" commit that moves the entry
+tools/release.py 1.2.0 --push    # the same, then push the tag and main and create the GitHub release
+```
+
+The tag is made first and the catalog change is a second commit, because a commit cannot contain its
+own hash. The script refuses to run with uncommitted changes, away from `main`, with failing tests, or
+with a version that is not newer than the current one, and it pushes the tag before `main` so the
+catalog never names a tag the server does not have. `--dry-run` checks everything and changes nothing;
+`--no-github` skips creating the GitHub release. `gh` must be installed and signed in for that step.
+
+The version lives only on the marketplace entry (not in `plugin.json`). To try local changes without a
+release, use `claude --plugin-dir .`: adding this repository as a marketplace installs the released tag
+from GitHub, not your working tree.
 
 ## Real-device validation procedure
 
