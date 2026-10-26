@@ -110,6 +110,7 @@ x 0-15    mascot      16x16 looping animation, one per state
             rows 8-11   Editing          tiny font, white (WORKING only)
             rows 14-15  comet            32px wide under the text, x 20-51 (WORKING only)
 x 55-71   rows 12-15 permission-mode badge, colored text (not shown in the default mode)
+x 56-71   rows 0-11  fireworks (FINISHED only)
 ```
 
 ### Mascot
@@ -121,8 +122,8 @@ A pixel-art Claude (orange, blocky, eyes as cut-outs) reacts to the state:
 | `WORKING` | sits behind a laptop typing, a glowing logo on the lid, ellipsis dots pulsing overhead |
 | `WAITING_FOR_INPUT` | glances left and right, taps a foot, amber `?` bobbing; the label reads `WAITING` followed by animated dots (`.`, `..`, `...`) |
 | `LIMIT` | worn out and sweating beside a running hourglass; `LIMIT HIT` with the reset time underneath when the error gives one |
-| `FINISHED` | jumps twice in a shower of confetti, then waves with twinkling sparkles |
-| `ERROR` | dizzy X eyes, shakes, red `!`, a puff of smoke |
+| `FINISHED` | jumps twice in a shower of confetti, then waves with twinkling sparkles; the label flashes `!!`, a rainbow rail shimmers underneath and fireworks go off beside the text |
+| `ERROR` | dizzy X eyes, shakes, red `!`, a puff of smoke; the subtitle names the failure |
 | `READY` | waves hello, blinks, a `>_` prompt with a blinking cursor overhead |
 | `IDLE` | asleep and breathing, dim, little z's drifting up |
 
@@ -149,6 +150,14 @@ While `WAITING` it says what Claude is waiting for:
 | agent needs input | `Needs you` |
 | auto-resume stale | `Press Enter` |
 
+`ERROR` names the failure from the `StopFailure` error type: `Overloaded`, `Auth failed`,
+`Org blocked`, `On hold`, `Billing error`, `Bad input`, `Bad model`, `Server error` (`Server err`
+if it does not fit), `Max tokens`, `Cloud creds`, or `API error` for anything else.
+
+`FINISHED` says how long the turn took, measured from the prompt that started it and
+including time spent waiting for you: `Done in 42s`, or just `1m 23s` / `12m 5s` when the
+longer text would not fit.
+
 While `LIMIT HIT` it says when the limit lifts, if the error message includes it (`Resets 3pm`,
 `Resets 3:30pm`, `Back in 2h15m`), else `Rate limit`. The message format is not documented, so
 that parsing is best effort and always falls back to the plain cause. Other states show the
@@ -165,6 +174,18 @@ Text is centered on the whole display. A label too wide to clear the mascot
 (over about 8 characters in the title font) is centered in the 56px column
 beside it instead, and one too wide for that column (about 11 characters) is
 anchored at the column's left edge and scrolls rather than covering the mascot.
+
+### Celebration
+
+![The bar after Claude finishes: FINISHED with a flashing double exclamation mark, "Done in 42s" underneath, a rainbow rail along the bottom and fireworks to the right of the text](docs/finished.gif)
+
+`FINISHED` is the screen that is meant to feel good. Four small assets play together:
+the mascot's jump-and-confetti loop, the flashing `!!` (a 3×5 animation placed right
+after the label and centered with it, like the waiting dots), a rainbow rail with a
+highlight sweeping along it in the comet's slot, and fireworks bursting in the free area
+to the right of the text (x 56-71, rows 0-11). Animation pixels are opaque, so each effect
+lives in space no text uses. `WORKING_ANIMATION=false` turns the rail, the `!!` and the
+fireworks off together with the other bottom animations.
 
 ### Permission-mode badge
 

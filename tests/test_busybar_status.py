@@ -310,6 +310,8 @@ class StatusTests(unittest.TestCase):
         self.apply("PostToolUse", now=107)
         self.assertEqual(activity(), "Thinking")
         self.apply("Stop", now=108)
+        self.assertEqual(activity(), "Done in 8s", "FINISHED says how long the turn took")
+        self.apply("SessionEnd", now=109)
         self.assertEqual(activity(), "")
 
     def test_activity_change_triggers_dispatch_but_repeat_does_not(self):
@@ -402,8 +404,11 @@ class StatusTests(unittest.TestCase):
             if expected == "WAITING_FOR_INPUT":
                 self.assertEqual(set(device.screen), {status.TITLE_ID, status.SUBTITLE_ID, status.MASCOT_ID,
                                                       status.DOTS_ID, status.ANIMATION_ID}, expected)
-            elif expected == "LIMIT":
+            elif expected in ("LIMIT", "ERROR"):
                 self.assertEqual(set(device.screen), {status.TITLE_ID, status.SUBTITLE_ID, status.MASCOT_ID}, expected)
+            elif expected == "FINISHED":
+                self.assertEqual(set(device.screen), {status.TITLE_ID, status.SUBTITLE_ID, status.MASCOT_ID, status.BANG_ID,
+                                                      status.ANIMATION_ID, status.FIREWORKS_ID}, expected)
             elif expected != "WORKING":
                 self.assertEqual(set(device.screen), {status.TITLE_ID, status.MASCOT_ID}, expected)
 
@@ -411,9 +416,10 @@ class StatusTests(unittest.TestCase):
         device = FakeDevice()
         self.drive(device, [("UserPromptSubmit", {})])
         device.calls.clear()
-        self.drive(device, [("Stop", {})])
+        self.drive(device, [("StopFailure", {"error": "server_error"})])
         self.assertEqual(device.calls[-2:], [("POST", "/display/draw"), ("DELETE", "/display/draw")])
-        self.assertEqual(device.screen[status.TITLE_ID]["text"], "FINISHED")
+        self.assertEqual(device.screen[status.TITLE_ID]["text"], "ERROR")
+        self.assertNotIn(status.ANIMATION_ID, device.screen)
 
     def test_existing_assets_are_not_uploaded_again(self):
         device = FakeDevice()
@@ -447,13 +453,15 @@ class StatusTests(unittest.TestCase):
     def test_title_moves_to_the_vertical_center_when_there_is_no_subtitle(self):
         client = status.BusyBarClient(self.config)
         with_subtitle = client.elements("WORKING", activity="Reading")[status.TITLE_ID]
-        alone = client.elements("FINISHED")[status.TITLE_ID]
+        alone = client.elements("READY")[status.TITLE_ID]
         self.assertEqual(with_subtitle["y"], status.TITLE_Y)
         self.assertEqual(alone["y"], status.TITLE_CENTER_Y)
         self.assertGreater(alone["y"], with_subtitle["y"])
         device = FakeDevice()
-        self.drive(device, [("UserPromptSubmit", {}), ("Stop", {})])
+        self.drive(device, [("SessionStart", {"source": "startup"})])
         self.assertEqual(device.screen[status.TITLE_ID]["y"], status.TITLE_CENTER_Y)
+        self.drive(device, [("UserPromptSubmit", {}), ("Stop", {})])
+        self.assertEqual(device.screen[status.TITLE_ID]["y"], status.TITLE_Y, "FINISHED has a subtitle, so the title moves up")
 
     def test_text_is_centered_on_the_display_unless_it_would_reach_the_mascot(self):
         client = status.BusyBarClient(self.config)
@@ -609,7 +617,7 @@ class StatusTests(unittest.TestCase):
                          anim.ping_asset_name(self.config.colors["WAITING_FOR_INPUT"], status.COMET_WIDTH))
         working = status.asset_plan(self.config, "WORKING")
         self.assertNotEqual(working[status.ANIMATION_ID][0], waiting[status.ANIMATION_ID][0])
-        for state in ("LIMIT", "FINISHED", "ERROR", "READY", "IDLE"):
+        for state in ("LIMIT", "ERROR", "READY", "IDLE"):
             self.assertNotIn(status.ANIMATION_ID, status.asset_plan(self.config, state), state)
         off = dataclasses.replace(self.config, animation=False)
         self.assertNotIn(status.ANIMATION_ID, status.asset_plan(off, "WAITING_FOR_INPUT"))
@@ -623,13 +631,81 @@ class StatusTests(unittest.TestCase):
         self.assertEqual(device.screen[status.ANIMATION_ID]["path"], working[status.ANIMATION_ID][0])
         self.assertNotIn(status.DOTS_ID, device.screen)
 
+    def test_error_says_what_failed(self):
+        for error, expected in [
+            ("overloaded", "Overloaded"), ("authentication_failed", "Auth failed"), ("oauth_org_not_allowed", "Org blocked"),
+            ("account_on_hold", "On hold"), ("billing_error", "Billing error"), ("invalid_request", "Bad input"),
+            ("model_not_found", "Bad model"), ("server_error", "Server err"), ("max_output_tokens", "Max tokens"),
+            ("cloud_credential_error", "Cloud creds"), ("unknown", "API error"), ("brand_new_error", "API error"), (None, "API error"),
+        ]:
+            payload = {} if error is None else {"error": error}
+            self.assertEqual(status.error_subtitle(payload), expected, error)
+            self.assertLessEqual(font.text_width(expected, "tiny"), status.SUBTITLE_MAX_WIDTH, expected)
+        self.apply("UserPromptSubmit")
+        self.apply("StopFailure", now=101, error="authentication_failed")
+        with self.store.lock():
+            sessions = self.store.load_unlocked()["sessions"]
+        self.assertEqual(status.aggregate_activity(sessions, "ERROR"), "Auth failed")
+
+    def test_finished_says_how_long_the_turn_took(self):
+        for seconds, text in [(0, "0s"), (42, "42s"), (59.6, "1m"), (60, "1m"), (83, "1m 23s"), (720, "12m"), (725, "12m 5s"),
+                              (3600, "1h"), (3900, "1h 5m")]:
+            self.assertEqual(status.format_duration(seconds), text, seconds)
+        self.assertEqual(status.finished_subtitle(42), "Done in 42s")
+        self.assertEqual(status.finished_subtitle(83), "1m 23s", "'Done in 1m 23s' would not fit")
+        for seconds in (0, 42, 83, 725, 3900):
+            self.assertLessEqual(font.text_width(status.finished_subtitle(seconds), "tiny"), status.SUBTITLE_MAX_WIDTH)
+
+    def test_turn_timing_starts_on_a_new_prompt_and_survives_waiting(self):
+        def subtitle():
+            with self.store.lock():
+                sessions = self.store.load_unlocked()["sessions"]
+            return status.aggregate_activity(sessions, status.aggregate_state(sessions))
+
+        self.apply("SessionStart", now=100, source="startup")
+        self.apply("UserPromptSubmit", now=1000)
+        self.apply("PermissionRequest", now=1010, tool_name="Bash")
+        self.apply("PostToolUse", now=1100)
+        self.apply("UserPromptSubmit", now=1110)  # typed while the turn runs: the same turn
+        self.apply("Stop", now=1125)
+        self.assertEqual(subtitle(), "2m 5s", "measured from the first prompt")
+        self.apply("Stop", now=1130)
+        self.apply("UserPromptSubmit", now=2000)  # after a finished turn: a new one
+        self.apply("Stop", now=2003)
+        self.assertEqual(subtitle(), "Done in 3s")
+        self.apply("PreCompact", now=2010, trigger="manual")
+        self.apply("PostCompact", now=2011, trigger="manual")
+        self.assertEqual(subtitle(), "Done in 3s", "compaction restores the finished subtitle")
+
+    def test_finished_celebrates_with_bang_rainbow_and_fireworks_in_free_space(self):
+        plan = status.asset_plan(self.config, "FINISHED")
+        self.assertEqual(set(plan), {status.MASCOT_ID, status.BANG_ID, status.ANIMATION_ID, status.FIREWORKS_ID})
+        self.assertEqual(plan[status.ANIMATION_ID][0], anim.celebration_asset_name("rainbow", status.COMET_WIDTH))
+        off = dataclasses.replace(self.config, animation=False)
+        self.assertEqual(set(status.asset_plan(off, "FINISHED")), {status.MASCOT_ID})
+        client = status.BusyBarClient(self.config)
+        assets = {key: value[0] for key, value in plan.items()}
+        wanted = client.elements("FINISHED", activity="Done in 42s", assets=assets)
+        title, bang = wanted[status.TITLE_ID], wanted[status.BANG_ID]
+        label = font.text_width("FINISHED")
+        self.assertEqual(bang["x"], title["x"] + label + 1)
+        self.assertEqual(bang["y"], title["y"] + 2, "the bars span the caps")
+        unit = label + 1 + anim.BANG_WIDTH
+        self.assertEqual(title["x"], 36 - unit // 2)
+        fireworks = wanted[status.FIREWORKS_ID]
+        self.assertEqual((fireworks["x"], fireworks["y"]), (56, 0))
+        self.assertGreaterEqual(fireworks["x"], bang["x"] + anim.BANG_WIDTH, "clear of the title")
+        self.assertGreaterEqual(fireworks["x"], 36 - 40 // 2 + 40, "and of the widest centered subtitle")
+        self.assertLessEqual(fireworks["y"] + anim.FIREWORKS_HEIGHT, status.BADGE_Y + 1, "above the badge")
+        self.assertEqual(wanted[status.ANIMATION_ID]["x"], status.COMET_X)
+
     def test_waiting_dots_follow_the_label_and_are_centered_with_it(self):
         client = status.BusyBarClient(self.config)
         dots_name = anim.dots_asset_name(self.config.colors["WAITING_FOR_INPUT"])
         wanted = client.elements("WAITING_FOR_INPUT", assets={status.DOTS_ID: dots_name})
         title, dots = wanted[status.TITLE_ID], wanted[status.DOTS_ID]
         label = font.text_width("WAITING")  # 28
-        unit = label + status.DOTS_GAP + anim.DOTS_WIDTH  # "WAITING..." is 34px wide
+        unit = label + status.SUFFIX_GAP + anim.DOTS_WIDTH  # "WAITING..." is 34px wide
         self.assertEqual((label, unit), (28, 34))
         self.assertEqual((title["align"], title["x"]), ("top_left", 36 - unit // 2))
         self.assertEqual((dots["x"], dots["y"]), (title["x"] + label + 1, title["y"] + 6), "on the baseline, one px after the G")
@@ -790,6 +866,33 @@ class FontTests(unittest.TestCase):
 
 
 class AnimationTests(unittest.TestCase):
+    def frames_of(self, blob):
+        section_len = struct.unpack("<I", blob[16:20])[0]
+        records, offset, frames = blob[36 + section_len:], 0, []
+        while offset < len(records):
+            encoding, duration, length = struct.unpack("<BBH", records[offset:offset + 4])
+            payload = records[offset + 4:offset + 4 + length]
+            frames.append(anim.rle_decompress(payload) if encoding == 1 else payload)
+            offset += 4 + length
+        return frames
+
+    def test_celebration_assets_have_the_right_size_and_move(self):
+        for blob, size in [(anim.bang_animation(), (3, 5)), (anim.rainbow_animation(32), (32, 2)),
+                           (anim.fireworks_animation(), (16, 12))]:
+            self.assertEqual(blob[9:11], bytes(size))
+            frames = self.frames_of(blob)
+            self.assertEqual({len(frame) for frame in frames}, {size[0] * size[1] * 3})
+            self.assertGreaterEqual(len(set(frames)), 5, "it animates")
+        bang = self.frames_of(anim.bang_animation())[0]
+        self.assertEqual([bang[(y * 3 + 1) * 3:(y * 3 + 1) * 3 + 3] == b"\x00\x00\x00" for y in range(5)], [True] * 5, "gap column")
+        self.assertEqual(bang[(3 * 3) * 3:(3 * 3) * 3 + 3], b"\x00\x00\x00", "gap row")
+        self.assertNotEqual(bang[0:3], b"\x00\x00\x00")
+        fireworks = self.frames_of(anim.fireworks_animation())
+        lit = lambda frame: sum(1 for i in range(0, len(frame), 3) if frame[i:i + 3] != b"\x00\x00\x00")
+        self.assertGreater(max(lit(frame) for frame in fireworks), 20, "bursts have many sparks")
+        self.assertGreater(min(lit(frame) for frame in fireworks), 0, "something is always going off")
+
+
     def test_ping_is_a_loop_of_rings_spreading_from_the_middle(self):
         frames = anim.ping_frames((255, 176, 0), 32)
         self.assertEqual(len(frames), anim.PING_FRAMES)

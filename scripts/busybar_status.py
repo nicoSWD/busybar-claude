@@ -87,8 +87,9 @@ TOOL_ACTIVITY = {
 }
 THINKING_EVENTS = {"UserPromptSubmit", "PermissionDenied", "ElicitationResult", "PostCompact"}
 RATE_LIMIT_ERRORS = {"rate_limit"}
-# States whose subtitle says more: what Claude is doing, what it waits for, which limit it hit.
-SUBTITLE_STATES = ("WORKING", "WAITING_FOR_INPUT", "LIMIT")
+# States whose subtitle says more: what Claude is doing, what it waits for, which limit it hit, what
+# failed, how long the turn took.
+SUBTITLE_STATES = ("WORKING", "WAITING_FOR_INPUT", "LIMIT", "ERROR", "FINISHED")
 SUBTITLE_MAX_WIDTH = 40  # px; wider text no longer centers on the display beside the mascot
 INTERACTIVE_SUBTITLES = {"AskUserQuestion": "Question", "ExitPlanMode": "Plan ready"}
 NOTIFICATION_SUBTITLES = {
@@ -99,6 +100,19 @@ NOTIFICATION_SUBTITLES = {
     "agent_needs_input": "Needs you",
     "quota_auto_resume_stale": "Press Enter",
     "quota_auto_resume_disabled": "Your turn",
+}
+# StopFailure `error` -> subtitle candidates, first one that fits SUBTITLE_MAX_WIDTH wins.
+ERROR_SUBTITLES = {
+    "overloaded": ["Overloaded"],
+    "authentication_failed": ["Auth failed"],
+    "oauth_org_not_allowed": ["Org blocked"],
+    "account_on_hold": ["On hold"],
+    "billing_error": ["Billing error"],
+    "invalid_request": ["Bad input"],
+    "model_not_found": ["Bad model"],
+    "server_error": ["Server error", "Server err"],
+    "max_output_tokens": ["Max tokens"],
+    "cloud_credential_error": ["Cloud creds"],
 }
 RESET_CLOCK = re.compile(r"reset[s]?\s+(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*([ap])\.?m", re.IGNORECASE)
 RESET_IN = re.compile(
@@ -142,14 +156,23 @@ MODE_BADGES = {
     "dontAsk": ("LOCK", "#C0C4D0FF"),
     "bypassPermissions": ("RISK", "#FF3030FF"),
 }
+BANG_ID = "claude-bang"
+FIREWORKS_ID = "claude-fireworks"
+FIREWORKS_X = 56  # the free area right of the text (x 56-71, rows 0-11)
 DOTS_ID = "claude-dots"
-DOTS_GAP = 1  # pixels between the last letter and the first dot, as between letters
+SUFFIX_GAP = 1  # pixels between the last letter and an animated suffix, as between letters
 MASCOT_ID = "claude-mascot"
 MASCOT_WIDTH = busybar_mascot.SIZE
 DISPLAY_WIDTH = 72
-MANAGED_IDS = (TITLE_ID, SUBTITLE_ID, MASCOT_ID, ANIMATION_ID, DOTS_ID, MODE_ID)
-LAYOUT_VERSION = 9  # bump to force a redraw after changing the layout above
-DEMO_SUBTITLES = {"WORKING": "Editing", "WAITING_FOR_INPUT": "Allow Bash?", "LIMIT": "Resets 3pm"}
+MANAGED_IDS = (TITLE_ID, SUBTITLE_ID, MASCOT_ID, ANIMATION_ID, DOTS_ID, BANG_ID, FIREWORKS_ID, MODE_ID)
+LAYOUT_VERSION = 10  # bump to force a redraw after changing the layout above
+DEMO_SUBTITLES = {
+    "WORKING": "Editing",
+    "WAITING_FOR_INPUT": "Allow Bash?",
+    "LIMIT": "Resets 3pm",
+    "FINISHED": "Done in 42s",
+    "ERROR": "Overloaded",
+}
 ASSET_RETRY_SECONDS = 60.0
 ASSET_UPLOAD_TIMEOUT = 15.0
 
@@ -413,6 +436,29 @@ def limit_subtitle(payload: Mapping[str, Any]) -> str:
     return "Rate limit"
 
 
+def error_subtitle(payload: Mapping[str, Any]) -> str:
+    for candidate in ERROR_SUBTITLES.get(str(payload.get("error", "")), ["API error"]):
+        if _fits(candidate):
+            return candidate
+    return "API error"
+
+
+def format_duration(seconds: float) -> str:
+    seconds = max(0, int(round(seconds)))
+    if seconds < 60:
+        return "%ds" % seconds
+    minutes, seconds = divmod(seconds, 60)
+    if minutes < 60:
+        return "%dm %ds" % (minutes, seconds) if seconds else "%dm" % minutes
+    hours, minutes = divmod(minutes, 60)
+    return "%dh %dm" % (hours, minutes) if minutes else "%dh" % hours
+
+
+def finished_subtitle(seconds: float) -> str:
+    duration = format_duration(seconds)
+    return "Done in " + duration if _fits("Done in " + duration) else duration
+
+
 def aggregate_state(sessions: Mapping[str, Mapping[str, Any]]) -> str:
     if not sessions:
         return "IDLE"
@@ -469,17 +515,34 @@ def apply_event(store: Store, payload: Mapping[str, Any], now: Optional[float] =
                 record["mode"] = "" if mode == "default" else mode
             elif old.get("mode"):
                 record["mode"] = old["mode"]
+            turn_started = old.get("turn_started")
+            if event == "UserPromptSubmit" and old.get("state") not in ("WORKING", "WAITING_FOR_INPUT", "LIMIT"):
+                turn_started = now  # a new turn (a prompt while one is running just continues it)
+            if turn_started is not None:
+                record["turn_started"] = turn_started
             if event == "PreCompact":
-                resume = old.get("resume_state") if old.get("event") == "PreCompact" else old.get("state")
-                if resume:
-                    record["resume_state"] = resume
+                carried = old if old.get("event") == "PreCompact" else {"resume_state": old.get("state"), "resume_activity": old.get("activity")}
+                if carried.get("resume_state"):
+                    record["resume_state"] = carried["resume_state"]
+                if carried.get("resume_activity"):
+                    record["resume_activity"] = carried["resume_activity"]
             if state == "WORKING":
                 activity = event_activity(payload)
                 if activity is None:
                     activity = str(old.get("activity", "")) if old.get("state") == "WORKING" else ""
                 record["activity"] = activity or "Thinking"
-            elif state in ("WAITING_FOR_INPUT", "LIMIT"):
-                detail = limit_subtitle(payload) if state == "LIMIT" else waiting_subtitle(payload)
+            elif state in ("WAITING_FOR_INPUT", "LIMIT", "ERROR", "FINISHED"):
+                if state == "LIMIT":
+                    detail: Optional[str] = limit_subtitle(payload)
+                elif state == "ERROR":
+                    detail = error_subtitle(payload)
+                elif state == "FINISHED":
+                    if event == "PostCompact":
+                        detail = old.get("resume_activity")
+                    else:
+                        detail = finished_subtitle(now - turn_started) if turn_started is not None else None
+                else:
+                    detail = waiting_subtitle(payload)
                 if event == "Notification" and old.get("state") == state and old.get("activity"):
                     detail = str(old["activity"])  # a permission prompt right after PermissionRequest: keep the specific one
                 if detail:
@@ -591,23 +654,30 @@ class BusyBarClient:
         wanted = {TITLE_ID: text_element(TITLE_ID, text, TITLE_FONT, title_y, rgba)}
         if subtitle:
             wanted[SUBTITLE_ID] = text_element(SUBTITLE_ID, subtitle, SUBTITLE_FONT, SUBTITLE_Y, config.subtitle_color)
-        if DOTS_ID in assets:
-            # Lay the label and its animated dots out as one unit centered like a plain title.
+        for suffix_id, suffix_width, suffix_dy in (
+            (DOTS_ID, busybar_anim.DOTS_WIDTH, 6),  # dots sit on the baseline
+            (BANG_ID, busybar_anim.BANG_WIDTH, 2),  # the "!!" spans the caps
+        ):
+            if suffix_id not in assets:
+                continue
+            # Lay the label and its animated suffix out as one unit centered like a plain title.
             label_width = busybar_font.text_width(text, TITLE_FONT)
-            unit = label_width + DOTS_GAP + busybar_anim.DOTS_WIDTH
+            unit = label_width + SUFFIX_GAP + suffix_width
             if not config.mascot or unit <= DISPLAY_WIDTH - 2 * MASCOT_WIDTH:
                 center = DISPLAY_WIDTH // 2
             else:
                 center = config.column_x + config.column_width // 2
             left = center - unit // 2
-            if left >= config.column_x:  # otherwise it cannot fit: show the plain label, no dots
+            if left >= config.column_x:  # otherwise it cannot fit: show the plain label, no suffix
                 wanted[TITLE_ID].update(align="top_left", x=left)
                 wanted[TITLE_ID].pop("width", None)
-                wanted[DOTS_ID] = animation_element(DOTS_ID, left + label_width + DOTS_GAP, title_y + 6)
+                wanted[suffix_id] = animation_element(suffix_id, left + label_width + SUFFIX_GAP, title_y + suffix_dy)
         if MASCOT_ID in assets:
             wanted[MASCOT_ID] = animation_element(MASCOT_ID, 0, 0)
         if ANIMATION_ID in assets:
             wanted[ANIMATION_ID] = animation_element(ANIMATION_ID, COMET_X, ANIMATION_Y)
+        if FIREWORKS_ID in assets:
+            wanted[FIREWORKS_ID] = animation_element(FIREWORKS_ID, FIREWORKS_X, 0)
         if config.mode_badge and mode in MODE_BADGES:
             word, word_color = MODE_BADGES[mode]
             wanted[MODE_ID] = {
@@ -798,6 +868,13 @@ def asset_plan(config: Config, status: str) -> Dict[str, Tuple[str, Callable[[],
     if status == "WAITING_FOR_INPUT" and config.waiting_dots:
         dots_color = config.colors[status]
         plan[DOTS_ID] = (busybar_anim.dots_asset_name(dots_color), lambda: busybar_anim.dots_animation(dots_color))
+    if status == "FINISHED" and config.animation:
+        plan[BANG_ID] = (busybar_anim.celebration_asset_name("bang"), busybar_anim.bang_animation)
+        plan[ANIMATION_ID] = (
+            busybar_anim.celebration_asset_name("rainbow", COMET_WIDTH),
+            lambda: busybar_anim.rainbow_animation(COMET_WIDTH),
+        )
+        plan[FIREWORKS_ID] = (busybar_anim.celebration_asset_name("fireworks"), busybar_anim.fireworks_animation)
     if status == "WAITING_FOR_INPUT" and config.animation:
         ping_color = config.colors[status]
         plan[ANIMATION_ID] = (
