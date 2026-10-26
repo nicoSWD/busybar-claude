@@ -39,11 +39,13 @@ You need Claude Code, Python 3.9 or newer, and a BUSY Bar. (On Windows, read
    ```
 
 3. Run `/reload-plugins` (or start a new session). The bar now follows Claude.
+   Run `/busy-claude:setup` to check that everything is connected.
 
 Claude Code may say that "userConfig options are not yet set". They are all
 optional, and the defaults are right for a bar on USB.
 
-Using Wi-Fi instead of USB, or the bar does not react? See
+Using Wi-Fi instead of USB, or the bar does not react? Run `/busy-claude:setup`
+(or `scripts/busybarctl doctor` in a terminal) to see what is missing, then see
 [Connect the BUSY Bar](#connect-the-busy-bar) and [Troubleshooting](#troubleshooting).
 
 The same from a terminal:

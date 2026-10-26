@@ -49,5 +49,15 @@ class MarketplaceTests(unittest.TestCase):
         self.assertLess(readme.index("## Install"), readme.index("## What the official APIs support"))
 
 
+class SetupSkillTests(unittest.TestCase):
+    def test_setup_skill_is_user_invoked_and_runs_doctor(self):
+        text = (ROOT / "skills" / "setup" / "SKILL.md").read_text(encoding="utf-8")
+        header = text.split("---")[1]
+        self.assertIn("name: setup", header)
+        self.assertIn("disable-model-invocation: true", header)
+        self.assertIn('busybar_status.py" doctor', text)
+        self.assertNotIn("password:", text.lower().replace("the password", ""), "never collect secrets in chat")
+
+
 if __name__ == "__main__":
     unittest.main()

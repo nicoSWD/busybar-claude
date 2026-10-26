@@ -1211,12 +1211,20 @@ def dispatch(config: Config, force: bool = False, delay: float = 0.04) -> bool:
                 with store.lock():  # the screen may be half-updated: redraw everything next time
                     latest = store.load_unlocked()
                     latest["drawn"] = None
+                    latest["last_sent"] = None  # otherwise an unchanged state would never be redrawn
+                    latest["device"] = device_info(config)
+                    latest["last_error"] = ("%s: %s" % (type(error).__name__, error))[:200]
+                    latest["last_error_at"] = time.time()
                     store.save_unlocked(latest)
             return False
         with store.lock():
             latest = store.load_unlocked()
             latest["drawn"] = drawn
             latest["last_status"] = status
+            latest["device"] = device_info(config)
+            latest["last_ok_at"] = time.time()
+            latest.pop("last_error", None)
+            latest.pop("last_error_at", None)
             latest_status = aggregate_state(latest["sessions"])
             latest_activity = shown_activity(latest, latest_status, time.time())
             latest_mode = aggregate_mode(latest["sessions"], latest_status)
@@ -1234,6 +1242,124 @@ def dispatch(config: Config, force: bool = False, delay: float = 0.04) -> bool:
                     latest["last_sound_at"] = now
                     store.save_unlocked(latest)
         return True
+
+
+def device_info(config: Config) -> Dict[str, str]:
+    """Where the hooks talk to the bar (never the token), so tools outside the plugin can see it."""
+    return {"url": config.base_url, "auth_mode": config.auth_mode}
+
+
+Check = Tuple[str, str, str]  # (level: ok | fail | info, message, hint)
+
+
+def _age(seconds: float) -> str:
+    seconds = max(0.0, seconds)
+    if seconds < 90:
+        return "%d s" % seconds
+    if seconds < 5400:
+        return "%d min" % round(seconds / 60)
+    return "%d h" % round(seconds / 3600)
+
+
+def doctor_checks(config: Config, now: Optional[float] = None, home: Optional[Path] = None) -> List[Check]:
+    """Checklist for "is the bar set up?". Runs outside the hooks, so it only knows what the hooks wrote down."""
+    now = time.time() if now is None else now
+    home = Path.home() if home is None else home
+    checks: List[Check] = [("ok", "Python %d.%d.%d" % sys.version_info[:3], "")]
+
+    store = Store(statusline_config(config))
+    data: Dict[str, Any] = {}
+    if store.path.exists():
+        with contextlib.suppress(Exception):
+            with store.lock():
+                data = store.load_unlocked()
+    if not (data.get("sessions") or data.get("device") or data.get("last_sent")):
+        checks.append((
+            "fail",
+            "No hook has run yet (no state in %s)" % store.directory,
+            "Start a new Claude Code session or run /reload-plugins. Still nothing? Check `claude plugin list` shows busy-claude enabled.",
+        ))
+    else:
+        checks.append(("ok", "Hooks are running (state in %s)" % store.directory, ""))
+        last_ok, last_error_at = data.get("last_ok_at"), data.get("last_error_at")
+        if data.get("last_error") and (last_ok is None or float(last_error_at or 0) >= float(last_ok)):
+            checks.append((
+                "fail",
+                "The last attempt to draw failed %s ago: %s" % (_age(now - float(last_error_at or now)), data["last_error"]),
+                "Is the bar plugged in and awake? For Wi-Fi, check the options with /plugin configure busy-claude@busybar-claude.",
+            ))
+        elif last_ok is not None:
+            checks.append(("ok", "Last successful draw %s ago" % _age(now - float(last_ok)), ""))
+        else:
+            checks.append(("info", "Nothing has been drawn yet", "The bar updates on the next Claude Code event."))
+
+    device = data.get("device") or {}
+    url = str(device.get("url") or config.base_url)
+    auth_mode = str(device.get("auth_mode") or config.auth_mode)
+    if auth_mode != "usb":
+        checks.append((
+            "info",
+            "Connection is %s (%s): not tested here" % (auth_mode, url),
+            "The password is only visible to the plugin itself. The last draw above shows whether it works.",
+        ))
+    else:
+        client = BusyBarClient(dataclasses.replace(config, base_url=url, auth_mode="usb"))
+        try:
+            version = client.check()
+        except Exception as error:
+            checks.append((
+                "fail",
+                "The bar does not answer at %s (%s)" % (url, type(error).__name__),
+                "Plug it in with USB-C and give it a moment. Using Wi-Fi? Run /plugin configure busy-claude@busybar-claude.",
+            ))
+        else:
+            checks.append(("ok", "The bar answers at %s (API %s)" % (url, version.get("api_semver", "?")), ""))
+            with contextlib.suppress(Exception):
+                listing = client.asset_listing()
+                planned = {name for state in STATUSES for name, _ in asset_plan(config, state).values()}
+                missing = sorted(planned - set(listing))
+                if missing:
+                    checks.append((
+                        "info",
+                        "%d of %d animations and sounds are not on the bar yet" % (len(missing), len(planned)),
+                        "They are installed the first time they are needed, or now with `busybarctl assets`.",
+                    ))
+                else:
+                    checks.append(("ok", "All %d animations and sounds are on the bar" % len(planned), ""))
+
+    settings = home / ".claude" / "settings.json"
+    wired = False
+    with contextlib.suppress(Exception):
+        command = (json.loads(settings.read_text(encoding="utf-8")).get("statusLine") or {}).get("command", "")
+        wired = "busybar" in str(command).lower() or "statusline.py" in str(command)
+    if wired:
+        checks.append(("ok", "The statusline wrapper is set up (plan usage on the READY screen)", ""))
+    else:
+        checks.append(("info", "Statusline wrapper not set up (optional: plan usage on the READY screen)", "See the README section on the optional statusline."))
+
+    installed = False
+    with contextlib.suppress(Exception):
+        plugins = json.loads((home / ".claude" / "plugins" / "installed_plugins.json").read_text(encoding="utf-8")).get("plugins", {})
+        installed = any(str(key).startswith("busy-claude@") for key in plugins if not str(key).endswith("@skills-dir"))
+    if installed and (home / ".claude" / "skills" / "busy-claude" / ".claude-plugin" / "plugin.json").exists():
+        checks.append((
+            "fail",
+            "Installed twice: from a marketplace and as ~/.claude/skills/busy-claude, so every hook runs twice",
+            "Remove one: delete the folder, or run `claude plugin uninstall busy-claude@busybar-claude`.",
+        ))
+    return checks
+
+
+def doctor(config: Config) -> int:
+    marks = {"ok": "[ok]  ", "fail": "[FAIL]", "info": "[--]  "}
+    checks = doctor_checks(config)
+    for level, message, hint in checks:
+        print("%s %s" % (marks[level], message))
+        if hint and level != "ok":
+            print("       %s" % hint)
+    failed = sum(1 for level, _, _ in checks if level == "fail")
+    print("\n%s" % ("Everything looks good." if not failed else "%d problem%s found." % (failed, "" if failed == 1 else "s")))
+    return 1 if failed else 0
 
 
 def detached(config: Config, mode: str) -> Optional[int]:
@@ -1436,7 +1562,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--auth", choices=("usb", "wifi", "cloud"), help="authentication mode")
     parser.add_argument("--token", help="Wi-Fi password or cloud API token")
     parser.add_argument("--timeout", type=float, help="HTTP timeout in seconds")
-    subparsers = parser.add_subparsers(dest="command", required=True, metavar="{check,send,demo,assets,state,statusline}")
+    subparsers = parser.add_subparsers(dest="command", required=True, metavar="{check,send,demo,assets,state,doctor,statusline}")
     subparsers.add_parser("hook")
     subparsers.add_parser("check", help="verify the connection and print the API version response")
     send = subparsers.add_parser("send", help="send one status immediately")
@@ -1450,6 +1576,7 @@ def build_parser() -> argparse.ArgumentParser:
     sound = subparsers.add_parser("sound", help="play one of the notification sounds on the bar")
     sound.add_argument("kind", choices=sorted(busybar_sound.KINDS))
     subparsers.add_parser("state", help="print the shared session state")
+    subparsers.add_parser("doctor", help="check the installation and the connection to the bar")
     statusline = subparsers.add_parser("statusline", help="statusLine wrapper that records plan usage, model and context")
     statusline.add_argument("--next", dest="next_command", help="your existing statusLine command, run with the same input")
     subparsers.add_parser("_dispatch")
@@ -1475,6 +1602,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         except (ValueError, OSError):
             payload = {}
         return handle_hook(config, payload)
+    if args.command == "doctor":
+        return doctor(config)
     if args.command == "statusline":
         return run_statusline(statusline_config(config), args.next_command)
     if args.command == "_dispatch":

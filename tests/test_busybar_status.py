@@ -396,6 +396,122 @@ class StatusTests(unittest.TestCase):
         ):
             self.assertEqual(status.statusline_config(self.config), self.config, "an explicit directory wins")
 
+    def doctor_data(self, **extra):
+        data = {"version": 1, "sessions": {"a": {"state": "READY", "updated_at": 1000.0}}, "last_sent": None}
+        data.update(extra)
+        with self.store.lock():
+            self.store.save_unlocked(data)
+
+    def run_doctor(self, config=None, now=1100.0, home=None, check=None, listing=None):
+        config = config or self.config
+        home = home or Path(self.tempdir.name) / "home"
+        with mock.patch.object(status.BusyBarClient, "check", side_effect=check or (lambda self: {"api_semver": "27.5.0"}), autospec=True) as probe, \
+                mock.patch.object(status.BusyBarClient, "asset_listing", return_value=listing or {}), \
+                mock.patch.dict(os.environ, {"BUSYBAR_STATE_DIR": "", "CLAUDE_PLUGIN_DATA": ""}):
+            return status.doctor_checks(config, now=now, home=home), probe
+
+    def levels(self, checks):
+        return [level for level, _, _ in checks]
+
+    def test_doctor_reports_a_missing_installation(self):
+        checks, _ = self.run_doctor()
+        self.assertIn("fail", self.levels(checks))
+        self.assertIn("No hook has run yet", " ".join(message for _, message, _ in checks))
+
+    def test_doctor_is_happy_with_a_working_setup(self):
+        self.doctor_data(device={"url": "http://10.0.4.20/api", "auth_mode": "usb"}, last_ok_at=1070.0)
+        with mock.patch.object(status, "statusline_config", return_value=self.config):
+            checks, probe = self.run_doctor()
+        self.assertNotIn("fail", self.levels(checks), checks)
+        messages = " ".join(message for _, message, _ in checks)
+        self.assertIn("Last successful draw 30 s ago", messages)
+        self.assertIn("API 27.5.0", messages)
+        probe.assert_called_once()
+
+    def test_doctor_surfaces_the_last_draw_error_and_an_unreachable_bar(self):
+        self.doctor_data(device={"url": "http://10.0.4.20/api", "auth_mode": "usb"}, last_error="URLError: timed out", last_error_at=1090.0)
+        def unreachable(client):
+            raise urllib.error.URLError("no route")
+        with mock.patch.object(status, "statusline_config", return_value=self.config):
+            checks, _ = self.run_doctor(check=unreachable)
+        failed = [message for level, message, _ in checks if level == "fail"]
+        self.assertEqual(len(failed), 2)
+        self.assertIn("timed out", failed[0])
+        self.assertIn("does not answer", failed[1])
+
+    def test_doctor_does_not_probe_wifi_connections_it_has_no_password_for(self):
+        self.doctor_data(device={"url": "http://192.168.1.20/api", "auth_mode": "wifi"}, last_ok_at=1090.0)
+        with mock.patch.object(status, "statusline_config", return_value=self.config):
+            checks, probe = self.run_doctor()
+        probe.assert_not_called()
+        self.assertNotIn("fail", self.levels(checks))
+        self.assertTrue(any("not tested here" in message for _, message, _ in checks))
+
+    def test_doctor_notices_the_statusline_and_a_double_install(self):
+        home = Path(self.tempdir.name) / "home"
+        (home / ".claude" / "plugins").mkdir(parents=True)
+        (home / ".claude" / "skills" / "busy-claude" / ".claude-plugin").mkdir(parents=True)
+        (home / ".claude" / "skills" / "busy-claude" / ".claude-plugin" / "plugin.json").write_text("{}")
+        (home / ".claude" / "plugins" / "installed_plugins.json").write_text(
+            json.dumps({"plugins": {"busy-claude@busybar-claude": [{}], "busy-claude@skills-dir": [{}]}})
+        )
+        (home / ".claude" / "settings.json").write_text(
+            json.dumps({"statusLine": {"type": "command", "command": "python3 x/busybar_status.py statusline"}})
+        )
+        self.doctor_data(device={"url": "u", "auth_mode": "wifi"}, last_ok_at=1090.0)
+        with mock.patch.object(status, "statusline_config", return_value=self.config):
+            checks, _ = self.run_doctor(home=home)
+        messages = [message for _, message, _ in checks]
+        self.assertTrue(any("statusline wrapper is set up" in message for message in messages))
+        self.assertTrue(any("Installed twice" in message for message in messages))
+        (home / ".claude" / "plugins" / "installed_plugins.json").write_text(
+            json.dumps({"plugins": {"busy-claude@skills-dir": [{}]}})
+        )
+        with mock.patch.object(status, "statusline_config", return_value=self.config):
+            checks, _ = self.run_doctor(home=home)
+        self.assertFalse(any("Installed twice" in message for _, message, _ in checks), "skills-dir alone is fine")
+
+    def test_doctor_exit_code_follows_the_failures(self):
+        with mock.patch.object(status, "doctor_checks", return_value=[("ok", "fine", ""), ("info", "meh", "hint")]):
+            with mock.patch("builtins.print"):
+                self.assertEqual(status.doctor(self.config), 0)
+        with mock.patch.object(status, "doctor_checks", return_value=[("fail", "broken", "fix it")]):
+            with mock.patch("builtins.print") as printed:
+                self.assertEqual(status.doctor(self.config), 1)
+        self.assertIn("1 problem found.", " ".join(str(call.args[0]) for call in printed.call_args_list))
+
+    def test_dispatch_records_what_doctor_needs_but_never_the_token(self):
+        configured = dataclasses.replace(
+            self.config, base_url="http://192.168.1.20/api", auth_mode="wifi", token="secret-pin", animation=False, mascot=False
+        )
+        store = status.Store(configured)
+        status.apply_event(store, {"hook_event_name": "UserPromptSubmit", "session_id": "one"})
+
+        def fake_urlopen(request, timeout):
+            return FakeResponse(b'{"result":"OK"}')
+
+        with mock.patch.object(status.urllib.request, "urlopen", side_effect=fake_urlopen):
+            self.assertTrue(status.dispatch(configured, delay=0))
+        with store.lock():
+            data = store.load_unlocked()
+        self.assertEqual(data["device"], {"url": "http://192.168.1.20/api", "auth_mode": "wifi"})
+        self.assertGreater(data["last_ok_at"], 0)
+        self.assertNotIn("secret-pin", json.dumps(data))
+
+        status.apply_event(store, {"hook_event_name": "Stop", "session_id": "one"})
+        with mock.patch.object(status.urllib.request, "urlopen", side_effect=urllib.error.URLError("unreachable")):
+            self.assertFalse(status.dispatch(configured, delay=0))
+        with store.lock():
+            data = store.load_unlocked()
+        self.assertIn("URLError", data["last_error"])
+        self.assertGreaterEqual(data["last_error_at"], data["last_ok_at"])
+
+        status.apply_event(store, {"hook_event_name": "UserPromptSubmit", "session_id": "one"})
+        with mock.patch.object(status.urllib.request, "urlopen", side_effect=fake_urlopen):
+            self.assertTrue(status.dispatch(configured, delay=0))
+        with store.lock():
+            self.assertNotIn("last_error", store.load_unlocked())
+
     def test_windows_lock_retries_until_free_and_unlocks(self):
         calls = []
 
