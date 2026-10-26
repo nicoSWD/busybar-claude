@@ -288,6 +288,114 @@ class StatusTests(unittest.TestCase):
         }
         self.assertEqual(status.focus_session(sessions, "WORKING"), "old")  # attention_at falls back to updated_at
 
+    STATUSLINE = {
+        "session_id": "a",
+        "model": {"display_name": "Fable 5"},
+        "effort": {"level": "max"},
+        "context_window": {"used_percentage": 42},
+        "rate_limits": {
+            "five_hour": {"used_percentage": 14.6, "resets_at": 10_000},
+            "seven_day": {"used_percentage": 3, "resets_at": 90_000},
+        },
+    }
+
+    def test_quota_text_drops_expired_and_malformed_windows(self):
+        quota = status.parse_quota(self.STATUSLINE["rate_limits"], 0)
+        self.assertEqual(status.quota_text(quota, 5_000), "5h15% 7d3%")
+        self.assertEqual(status.quota_text(quota, 10_000), "7d3%", "the 5h window has reset: its number is stale")
+        self.assertEqual(status.quota_text(quota, 90_000), "")
+        junk = {"five_hour": {"used_percentage": "lots"}, "seven_day": {"used_percentage": True}}
+        self.assertEqual(status.parse_quota(junk, 0), {})
+        self.assertEqual(status.parse_quota(None, 0), {})
+        self.assertEqual(status.quota_text(None, 0), "")
+        self.assertEqual(status.parse_quota({"five_hour": {"used_percentage": 250}}, 0)["five_hour"]["used"], 100.0)
+
+    def test_statusline_data_is_stored_and_quota_shows_only_on_the_ready_screen(self):
+        status.apply_statusline(self.store, self.STATUSLINE, now=1_000)
+        with self.store.lock():
+            data = self.store.load_unlocked()
+        self.assertEqual(data["meta"]["a"], {"updated_at": 1_000, "model": "Fable 5", "effort": "max", "context_used": 42.0})
+        self.assertEqual(data["quota"]["five_hour"]["used"], 14.6)
+        self.assertEqual(status.shown_activity(data, "READY", 1_000), "5h15% 7d3%")
+        self.assertEqual(status.shown_activity(data, "WORKING", 1_000), "", "busy screens are left alone")
+        self.apply("SessionStart", session="a", now=1_001)
+        self.apply("UserPromptSubmit", session="a", now=1_002)
+        with self.store.lock():
+            data = self.store.load_unlocked()
+        self.assertEqual(status.shown_activity(data, "WORKING", 1_002), "Thinking")
+
+    def test_statusline_updates_merge_windows_and_session_end_forgets_the_session(self):
+        status.apply_statusline(self.store, self.STATUSLINE, now=1_000)
+        status.apply_statusline(
+            self.store,
+            {"session_id": "a", "rate_limits": {"five_hour": {"used_percentage": 20, "resets_at": 10_000}}},
+            now=1_001,
+        )
+        with self.store.lock():
+            quota = self.store.load_unlocked()["quota"]
+        self.assertEqual((quota["five_hour"]["used"], quota["seven_day"]["used"]), (20.0, 3.0))
+        self.apply("SessionStart", session="a", now=1_002)
+        self.apply("SessionEnd", session="a", now=1_003)
+        with self.store.lock():
+            self.assertNotIn("a", self.store.load_unlocked()["meta"])
+
+    def test_ready_screen_subtitle_reaches_the_bar(self):
+        status.apply_statusline(self.store, self.STATUSLINE, now=1_000)
+        _, needs_dispatch = status.apply_event(
+            self.store, {"hook_event_name": "SessionStart", "session_id": "a", "source": "startup"}, now=1_001
+        )
+        self.assertTrue(needs_dispatch)
+        with self.store.lock():
+            data = self.store.load_unlocked()
+        self.assertEqual(status.shown_activity(data, "READY", 1_001), "5h15% 7d3%")
+        wanted = status.BusyBarClient(self.config).elements("READY", activity="5h15% 7d3%")
+        self.assertEqual(wanted[status.SUBTITLE_ID]["text"], "5h15% 7d3%")
+
+    def test_statusline_wrapper_records_then_shows_the_users_own_statusline(self):
+        class Stdin:
+            buffer = io.BytesIO(json.dumps(self.STATUSLINE).encode("utf-8"))
+
+        class Stdout:
+            buffer = io.BytesIO()
+
+        next_command = '"%s" -c "import sys; sys.stdout.write(sys.stdin.read().upper())"' % sys.executable
+        with mock.patch.object(status.sys, "stdin", Stdin()), mock.patch.object(status.sys, "stdout", Stdout()):
+            code = status.run_statusline(self.config, next_command)
+        self.assertEqual(code, 0)
+        self.assertIn(b'"SESSION_ID": "A"', Stdout.buffer.getvalue())  # the other command got the same JSON
+        with self.store.lock():
+            self.assertEqual(self.store.load_unlocked()["meta"]["a"]["model"], "Fable 5")
+
+    def test_statusline_wrapper_survives_bad_input_and_disabled_config(self):
+        class Stdin:
+            buffer = io.BytesIO(b"not json")
+
+        with mock.patch.object(status.sys, "stdin", Stdin()):
+            self.assertEqual(status.run_statusline(self.config, None), 0)
+        Stdin.buffer = io.BytesIO(json.dumps(self.STATUSLINE).encode("utf-8"))
+        disabled = dataclasses.replace(self.config, enabled=False)
+        with mock.patch.object(status.sys, "stdin", Stdin()):
+            self.assertEqual(status.run_statusline(disabled, None), 0)
+        with self.store.lock():
+            self.assertNotIn("meta", self.store.load_unlocked())
+
+    def test_statusline_finds_the_state_directory_the_hooks_published(self):
+        cache = Path(self.tempdir.name) / "cache"
+        hooks_dir = Path(self.tempdir.name) / "plugin-data"
+        hooks_dir.mkdir()
+        hooks_config = dataclasses.replace(self.config, state_dir=hooks_dir)
+        with mock.patch.object(status, "default_state_dir", return_value=cache), mock.patch.dict(
+            os.environ, {"BUSYBAR_STATE_DIR": "", "CLAUDE_PLUGIN_DATA": ""}
+        ):
+            status.publish_state_dir(hooks_config)
+            self.assertEqual(status.statusline_config(self.config).state_dir, hooks_dir)
+            status.publish_state_dir(dataclasses.replace(self.config, state_dir=cache))  # default dir: nothing to say
+            self.assertEqual(status.statusline_config(self.config).state_dir, hooks_dir)
+        with mock.patch.object(status, "default_state_dir", return_value=cache), mock.patch.dict(
+            os.environ, {"BUSYBAR_STATE_DIR": "/explicit"}
+        ):
+            self.assertEqual(status.statusline_config(self.config), self.config, "an explicit directory wins")
+
     def test_windows_lock_retries_until_free_and_unlocks(self):
         calls = []
 

@@ -392,6 +392,9 @@ class Store:
         ]
         for session_id in expired:
             sessions.pop(session_id, None)
+        meta = data.get("meta") or {}
+        for session_id in [key for key, item in meta.items() if now - float(item.get("updated_at", 0)) > self.config.stale_seconds]:
+            meta.pop(session_id, None)
         return bool(expired)
 
 
@@ -579,6 +582,77 @@ def aggregate_turn_seconds(sessions: Mapping[str, Mapping[str, Any]], state: str
     return float(value) if value is not None else None
 
 
+def _percent(value: Any) -> Optional[float]:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return min(100.0, max(0.0, float(value)))
+
+
+def parse_quota(rate_limits: Any, now: float) -> Dict[str, Any]:
+    """Plan usage windows ("five_hour", "seven_day") from the statusline's rate_limits, as {name: {used, resets_at}}."""
+    quota: Dict[str, Any] = {}
+    if not isinstance(rate_limits, Mapping):
+        return quota
+    for name in ("five_hour", "seven_day"):
+        window = rate_limits.get(name)
+        used = _percent(window.get("used_percentage")) if isinstance(window, Mapping) else None
+        if used is None:
+            continue
+        resets_at = window.get("resets_at")
+        quota[name] = {"used": used, "resets_at": float(resets_at) if isinstance(resets_at, (int, float)) else None}
+    return quota
+
+
+def quota_text(quota: Optional[Mapping[str, Any]], now: float) -> str:
+    """"5h15% 7d3%": plan usage so far. A window whose reset time has passed is no longer true, so it is left out."""
+    parts = []
+    for name, label in (("five_hour", "5h"), ("seven_day", "7d")):
+        window = (quota or {}).get(name)
+        if not isinstance(window, Mapping):
+            continue
+        resets_at = window.get("resets_at")
+        if resets_at is not None and float(resets_at) <= now:
+            continue
+        parts.append("%s%d%%" % (label, int(round(float(window.get("used", 0))))))
+    return " ".join(parts)
+
+
+def shown_activity(data: Mapping[str, Any], state: str, now: float) -> str:
+    """The subtitle for `state`. A session that is only open and waiting for a prompt shows plan usage instead."""
+    activity = aggregate_activity(data["sessions"], state)
+    if not activity and state == "READY":
+        return quota_text(data.get("quota"), now)
+    return activity
+
+
+def apply_statusline(store: Store, payload: Mapping[str, Any], now: Optional[float] = None) -> None:
+    """Record what the statusline knows: plan usage (account-wide) and per-session model, effort and context.
+
+    This never draws. The statusline process does not get the plugin's options (device address, colors), so
+    the next hook event shows the new values.
+    """
+    now = time.time() if now is None else now
+    session_id = str(payload.get("session_id") or "")
+    model, effort, context = payload.get("model"), payload.get("effort"), payload.get("context_window")
+    with store.lock():
+        data = store.load_unlocked()
+        store.prune_unlocked(data, now)
+        if session_id:
+            meta: Dict[str, Any] = {"updated_at": now}
+            if isinstance(model, Mapping) and model.get("display_name"):
+                meta["model"] = str(model["display_name"])
+            if isinstance(effort, Mapping) and effort.get("level"):
+                meta["effort"] = str(effort["level"])
+            used = _percent(context.get("used_percentage")) if isinstance(context, Mapping) else None
+            if used is not None:
+                meta["context_used"] = used
+            data.setdefault("meta", {})[session_id] = meta
+        quota = parse_quota(payload.get("rate_limits"), now)
+        if quota:
+            data["quota"] = dict(data.get("quota") or {}, **quota, updated_at=now)
+        store.save_unlocked(data)
+
+
 def apply_event(store: Store, payload: Mapping[str, Any], now: Optional[float] = None) -> Tuple[str, bool]:
     now = time.time() if now is None else now
     event = str(payload.get("hook_event_name", ""))
@@ -587,10 +661,11 @@ def apply_event(store: Store, payload: Mapping[str, Any], now: Optional[float] =
         data = store.load_unlocked()
         store.prune_unlocked(data, now)
         previous = aggregate_state(data["sessions"])
-        previous_activity = aggregate_activity(data["sessions"], previous)
+        previous_activity = shown_activity(data, previous, now)
         previous_mode = aggregate_mode(data["sessions"], previous)
         if event == "SessionEnd":
             data["sessions"].pop(session_id, None)
+            data.get("meta", {}).pop(session_id, None)
         else:
             old = data["sessions"].get(session_id, {})
             if event == "PostCompact":
@@ -652,7 +727,7 @@ def apply_event(store: Store, payload: Mapping[str, Any], now: Optional[float] =
             if event in REDRAW_EVENTS:
                 data["drawn"] = None
         current = aggregate_state(data["sessions"])
-        current_activity = aggregate_activity(data["sessions"], current)
+        current_activity = shown_activity(data, current, now)
         current_mode = aggregate_mode(data["sessions"], current)
         needs_dispatch = (
             current != previous
@@ -1115,7 +1190,7 @@ def dispatch(config: Config, force: bool = False, delay: float = 0.04) -> bool:
             data = store.load_unlocked()
             store.prune_unlocked(data, time.time())
             status = aggregate_state(data["sessions"])
-            activity = aggregate_activity(data["sessions"], status)
+            activity = shown_activity(data, status, time.time())
             mode = aggregate_mode(data["sessions"], status)
             turn_seconds = aggregate_turn_seconds(data["sessions"], status)
             previous_status = data.get("last_status")
@@ -1143,7 +1218,7 @@ def dispatch(config: Config, force: bool = False, delay: float = 0.04) -> bool:
             latest["drawn"] = drawn
             latest["last_status"] = status
             latest_status = aggregate_state(latest["sessions"])
-            latest_activity = aggregate_activity(latest["sessions"], latest_status)
+            latest_activity = shown_activity(latest, latest_status, time.time())
             latest_mode = aggregate_mode(latest["sessions"], latest_status)
             if render_fingerprint(config, latest_status, latest_activity, latest_mode) == fingerprint:
                 latest["last_sent"] = fingerprint
@@ -1267,9 +1342,60 @@ def reaper(config: Config) -> int:
             pass
 
 
+def state_dir_pointer() -> Path:
+    return default_state_dir() / "hook-state-dir"
+
+
+def publish_state_dir(config: Config) -> None:
+    """Tell processes outside the plugin (the statusline) which state directory the hooks use."""
+    if config.state_dir == default_state_dir():
+        return
+    with contextlib.suppress(OSError):
+        pointer = state_dir_pointer()
+        if pointer.exists() and pointer.read_text(encoding="utf-8").strip() == str(config.state_dir):
+            return
+        pointer.parent.mkdir(parents=True, exist_ok=True)
+        pointer.write_text(str(config.state_dir), encoding="utf-8")
+
+
+def statusline_config(config: Config) -> Config:
+    """The statusline command is not a plugin hook, so it has no CLAUDE_PLUGIN_DATA: follow the hooks' directory."""
+    if os.environ.get("BUSYBAR_STATE_DIR") or os.environ.get("CLAUDE_PLUGIN_DATA"):
+        return config
+    with contextlib.suppress(OSError):
+        published = Path(state_dir_pointer().read_text(encoding="utf-8").strip())
+        if published.is_dir():
+            return dataclasses.replace(config, state_dir=published)
+    return config
+
+
+def run_statusline(config: Config, next_command: Optional[str]) -> int:
+    """Statusline wrapper: save what Claude Code reports, then show the output of the user's own statusline command."""
+    stream = getattr(sys.stdin, "buffer", None)
+    raw = stream.read() if stream else sys.stdin.read().encode("utf-8")
+    if config.enabled:
+        with contextlib.suppress(Exception):  # collecting data must never break the statusline
+            payload = json.loads(raw.decode("utf-8", errors="replace"))
+            if isinstance(payload, dict):
+                apply_statusline(Store(config), payload)
+    if not next_command:
+        return 0
+    try:
+        result = subprocess.run(next_command, shell=True, input=raw, stdout=subprocess.PIPE, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return 1
+    out = getattr(sys.stdout, "buffer", None)
+    if out is not None:
+        out.write(result.stdout)
+        out.flush()
+    return result.returncode
+
+
 def handle_hook(config: Config, payload: Mapping[str, Any]) -> int:
     try:
         status, changed = apply_event(Store(config), payload)
+        if payload.get("hook_event_name") == "SessionStart":
+            publish_state_dir(config)
         log(config, "event=%s aggregate=%s changed=%s" % (payload.get("hook_event_name"), status, changed))
         if config.enabled and changed:
             detached(config, "_dispatch")
@@ -1310,7 +1436,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--auth", choices=("usb", "wifi", "cloud"), help="authentication mode")
     parser.add_argument("--token", help="Wi-Fi password or cloud API token")
     parser.add_argument("--timeout", type=float, help="HTTP timeout in seconds")
-    subparsers = parser.add_subparsers(dest="command", required=True, metavar="{check,send,demo,assets,state}")
+    subparsers = parser.add_subparsers(dest="command", required=True, metavar="{check,send,demo,assets,state,statusline}")
     subparsers.add_parser("hook")
     subparsers.add_parser("check", help="verify the connection and print the API version response")
     send = subparsers.add_parser("send", help="send one status immediately")
@@ -1324,6 +1450,8 @@ def build_parser() -> argparse.ArgumentParser:
     sound = subparsers.add_parser("sound", help="play one of the notification sounds on the bar")
     sound.add_argument("kind", choices=sorted(busybar_sound.KINDS))
     subparsers.add_parser("state", help="print the shared session state")
+    statusline = subparsers.add_parser("statusline", help="statusLine wrapper that records plan usage, model and context")
+    statusline.add_argument("--next", dest="next_command", help="your existing statusLine command, run with the same input")
     subparsers.add_parser("_dispatch")
     subparsers.add_parser("_reaper")
     return parser
@@ -1347,6 +1475,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         except (ValueError, OSError):
             payload = {}
         return handle_hook(config, payload)
+    if args.command == "statusline":
+        return run_statusline(statusline_config(config), args.next_command)
     if args.command == "_dispatch":
         dispatch(config)
         return 0

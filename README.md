@@ -130,7 +130,7 @@ no hook. It never uses timers to guess.
 x 0-15    mascot      16x16 looping animation, one per state
           text        centered on the whole display
             rows 1-5    WORKING          small font, state color (rows 6-10, centered, when alone)
-            rows 8-11   Editing          tiny font, white (WORKING only)
+            rows 8-11   Editing          tiny font, white (WORKING only; plan usage such as 5h15% 7d3% on READY, see step 5)
             rows 14-15  comet            32px wide under the text, x 20-51 (WORKING only)
 x 55-71   rows 12-15 permission-mode badge, colored text (not shown in the default mode)
 x 56-71   rows 0-11  fireworks (FINISHED only)
@@ -337,8 +337,8 @@ element.
 
 ## Setup
 
-Four steps: install the plugin, connect the bar (USB or LAN), tell the plugin
-where the bar is (LAN only), and check that it works.
+Four steps, plus an optional fifth: install the plugin, connect the bar (USB or LAN),
+tell the plugin where the bar is (LAN only), and check that it works.
 
 ### 1. Install the plugin
 
@@ -517,6 +517,49 @@ with a `BUSYBAR_` prefix.
 3. Nothing happens? Turn on the **Debug logging** option, reproduce it, and read
    `debug.log`. The [troubleshooting](#troubleshooting) section covers the usual
    causes (unreachable bar, wrong password, a magenta box, missing animation).
+
+### 5. Optional: plan usage on the READY screen
+
+Claude Code's statusline receives data that hooks do not: your plan usage (the
+5-hour and 7-day windows, Claude Pro and Max only), the model, the reasoning
+effort and context-window usage. A plugin cannot set `statusLine` itself, so
+this part is opt-in: you point your own `statusLine` at the plugin's wrapper,
+which records the data and then runs your existing statusline command with the
+same input, so what you see in the terminal does not change.
+
+Add this to `~/.claude/settings.json`, replacing the text after `--next` with your
+current `statusLine` command (leave `--next` out if you have none):
+
+```json
+{
+  "statusLine": {
+    "type": "command",
+    "command": "python3 ~/.claude/skills/busy-claude/scripts/busybar_status.py statusline --next \"your-current-statusline-command\""
+  }
+}
+```
+
+On Windows use the full path to the script instead of `~`.
+
+What it does:
+
+- The `READY` screen (a session is open and waiting for its first prompt) shows
+  plan usage as the subtitle, for example `5h15% 7d3%`: the share of each window
+  used so far. A window whose reset time has passed is left out until fresh data
+  arrives. The other screens are unchanged.
+- The wrapper never draws on the bar. It only saves the data, and the next hook
+  event shows it. Plan usage is account-wide, so the last value stays available
+  across sessions.
+- Per session it also stores the model, effort and context percentage. They are
+  not drawn yet; `./scripts/busybarctl state` shows them under `meta`, and plan
+  usage under `quota`.
+- The statusline is not a plugin hook, so it does not get the plugin's data
+  directory. The plugin writes the directory its hooks use to
+  `hook-state-dir` in the default cache folder at every `SessionStart`, and the
+  wrapper reads it from there. Set `BUSYBAR_STATE_DIR` for both if you want to
+  choose it yourself.
+- Claude Code skips a statusline until the folder is trusted, and plan usage
+  only appears after the first response of a session.
 
 ## Test the real connection
 
